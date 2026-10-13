@@ -1,5 +1,0 @@
-(fp_lib_table
-  (version 7)
-
-  (lib (name "teensy") (type "KiCad") (uri "${KIPRJMOD}/lib/teensy.pretty") (options "") (descr ""))
-  (lib (name "icc_gateway") (type "KiCad") (uri "${KIPRJMOD}/lib/icc_gateway.pretty") (options "") (descr "")))
