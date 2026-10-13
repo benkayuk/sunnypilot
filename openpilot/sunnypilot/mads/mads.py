@@ -62,10 +62,15 @@ class ModularAssistiveDrivingSystem:
     self.main_enabled_toggle = self.params.get_bool("MadsMainCruiseAllowed")
     self.steering_mode_on_brake = read_steering_mode_param(self.CP, self.CP_SP, self.params)
     self.unified_engagement_mode = self.params.get_bool("MadsUnifiedEngagementMode")
+    # Fisker-specific per-cruise-main-button MADS arming (see fisker.carstate). False
+    # means "ACC-only" (RiBtnNorth engaged cruise), True means "ACC + MADS" (RiBtnEast).
+    # The param is written by carstate on button edges + reset to False on ignition.
+    self.fisker_mads_armed = self.params.get_bool("FiskerMadsArmed")
 
   def read_params(self):
     self.main_enabled_toggle = self.params.get_bool("MadsMainCruiseAllowed")
     self.unified_engagement_mode = self.params.get_bool("MadsUnifiedEngagementMode")
+    self.fisker_mads_armed = self.params.get_bool("FiskerMadsArmed")
 
   def pedal_pressed_non_gas_pressed(self, CS: structs.CarState) -> bool:
     # ignore `pedalPressed` events caused by gas presses
@@ -86,6 +91,13 @@ class ModularAssistiveDrivingSystem:
   def block_unified_engagement_mode(self) -> bool:
     # UEM disabled
     if not self.unified_engagement_mode:
+      return True
+
+    # Fisker per-button MADS arming: on this port cruise can be engaged from either
+    # MFS_RiBtnNorth (ACC only) or MFS_RiBtnEast (ACC + lateral). carstate tracks the
+    # last-pressed main button and writes the FiskerMadsArmed param. Block UEM when the
+    # user hasn't armed lateral via East — defaults to "safer" after an ignition cycle.
+    if self.CP.brand == "fisker" and not self.fisker_mads_armed:
       return True
 
     if self.enabled:
@@ -184,6 +196,18 @@ class ModularAssistiveDrivingSystem:
           else:
             self.events_sp.add(EventNameSP.lkasDisable)
         else:
+          # Standard toggle behaviour on all brands including fisker. An earlier
+          # revision of this port disabled the engage path for fisker because
+          # standalone MADS from Standby hit an EPS authorisation issue; the port
+          # has since gained the ICC_0x52A byte-4 spoof (forces ICCACCSwt=1 so the
+          # ADAS module treats us as authorised), the "we are OEM" counter seeding
+          # on lat_engaged rising edge, and the EPS_DrvrIntvSteerWhlDetd override
+          # release — all three were among the suspects for the original failure.
+          # The MFS_RiBtnSouth long-press (short press is reserved for ACC follow-
+          # distance) now engages MADS standalone as expected on fisker. The gate
+          # `CS.cruiseState.available or self.allow_always` still enforces the
+          # port's contract that cruise be at least in Standby (RiBtnNorth pressed)
+          # before MADS can engage — allow_always stays False.
           self.events_sp.add(EventNameSP.lkasEnable)
 
     if not CS.cruiseState.available and not self.no_main_cruise:
