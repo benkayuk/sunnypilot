@@ -53,20 +53,33 @@ const state = {
 
 // ---------------------------------------------------------------- net helpers
 
+// All fetches carry an AbortController timeout. Without this a request to a
+// hung server (ungraceful client disconnect, kernel reclaiming stale TCP
+// sockets, bad wifi) would silently block in the browser until Chrome's
+// own ~2 min default — the UI would just appear frozen. 2 s is generous
+// for a local-wifi roundtrip (<10 ms typical) and tight enough that a
+// stuck request fails fast and the UI reflects it immediately.
+const FETCH_TIMEOUT_MS = 2000;
+
+function fetchWithTimeout(path, opts) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+  return fetch(path, {...opts, signal: ctrl.signal, cache: "no-store"})
+    .finally(() => clearTimeout(t));
+}
+
 async function postJSON(path, body) {
-  const r = await fetch(path, {
+  const r = await fetchWithTimeout(path, {
     method: "POST",
     headers: {"Content-Type": "application/json"},
     body: JSON.stringify(body || {}),
-    cache: "no-store",
-    keepalive: true,
   });
   if (!r.ok) throw new Error(`${path} ${r.status}`);
   return r.json();
 }
 
 async function getJSON(path) {
-  const r = await fetch(path, {cache: "no-store"});
+  const r = await fetchWithTimeout(path, {});
   if (!r.ok) throw new Error(`${path} ${r.status}`);
   return r.json();
 }
@@ -198,8 +211,16 @@ function wireSteerTrack() {
 // cause pileup over a flaky wifi link.
 function sendNow() {
   if (!state.armed) return;
+  // Belt-and-suspenders: if sendInFlight has somehow been true for longer
+  // than FETCH_TIMEOUT_MS × 2 (meaning both the .then and .catch somehow
+  // never ran — browser bug / backgrounded tab resume glitch), reset it.
+  if (state.sendInFlight && state.sendInFlightSince &&
+      Date.now() - state.sendInFlightSince > FETCH_TIMEOUT_MS * 2) {
+    state.sendInFlight = false;
+  }
   if (state.sendInFlight) return;  // drop; next tick will carry a fresher value
   state.sendInFlight = true;
+  state.sendInFlightSince = Date.now();
   const angle = state.touchActive ? state.touchAngle : 0;
   postJSON("/steer", {angle}).then(() => {
     state.sendInFlight = false;
@@ -230,12 +251,21 @@ function sendCommand() {
 // ---------------------------------------------------------------- buttons
 
 async function onArm() {
+  // Clear any stuck in-flight state from a previous session so the first
+  // heartbeat after arm fires without waiting for an orphaned promise.
+  state.sendInFlight = false;
+  state.sendFailures = 0;
   try {
     await postJSON("/arm", {});
     setArm(true);
     toast("App now controlling");
   } catch (e) {
-    toast("Failed to arm — check connection");
+    // Show the actual error — "nothing happens" is useless to diagnose
+    // but "ARM: AbortError" or "ARM: 500" tells you if it's a timeout, a
+    // server fault, a wrong URL, etc.
+    const msg = e && e.message ? e.message : String(e);
+    toast("ARM failed — " + msg, 3000);
+    console.error("arm failed:", e);
   }
 }
 
@@ -243,6 +273,7 @@ async function onDisarm() {
   try {
     await postJSON("/disarm", {});
   } catch (e) { /* ignore — manager-side will reset anyway */ }
+  state.sendInFlight = false;
   setArm(false);
   toast("Handed back to sunnypilot");
 }

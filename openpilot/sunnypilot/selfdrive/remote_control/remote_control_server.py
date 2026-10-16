@@ -46,6 +46,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
   # Populated in main() before the server starts.
   params: Params = None  # type: ignore[assignment]
 
+  # Socket timeout per request. BaseHTTPRequestHandler sets no timeout by
+  # default, so when a client ungracefully disconnects (wifi drop, tab
+  # closed, phone backgrounded) its handler thread sits blocked in
+  # socket.recv forever waiting on data that will never arrive — the OS
+  # eventually reclaims the socket in CLOSE_WAIT but that can take minutes.
+  # During that window: new clients see sluggish responses, in-flight
+  # heartbeats stack up behind the kernel's accept queue, and the whole
+  # thing looks like "server is broken."
+  #
+  # 5 s is way more than any real local-wifi roundtrip needs (which is
+  # ~2-5 ms) but far shorter than the kernel's default; stuck threads die
+  # cleanly and ThreadingMixIn spins up fresh ones for new clients.
+  timeout = 5.0
+
   # Silence the default access-log spam (BaseHTTPRequestHandler prints every
   # request to stderr by default, which fills journald during active steering).
   def log_message(self, fmt, *args):  # noqa: A003
@@ -166,6 +180,17 @@ class ThreadingServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
   the same time is well within budget."""
   daemon_threads = True
   allow_reuse_address = True
+  # Keep per-connection TCP keepalive on so the kernel notices half-open
+  # connections (wifi drops, phone sleep) and reclaims the socket rather
+  # than letting the handler thread sit on it. Combined with Handler.timeout
+  # above, a client disconnect leads to a clean exception + thread exit
+  # within a few seconds instead of up to tens of minutes.
+  request_queue_size = 32
+
+  def server_bind(self):
+    super().server_bind()
+    import socket as _s
+    self.socket.setsockopt(_s.SOL_SOCKET, _s.SO_KEEPALIVE, 1)
 
 
 def main():
