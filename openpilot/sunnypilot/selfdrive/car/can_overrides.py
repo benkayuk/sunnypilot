@@ -37,9 +37,6 @@ class OverrideTable:
 BRANDS: dict[str, tuple[str, str, tuple[OverrideTable, ...]]] = {
   # brand: (values module, opendbc DBC name, tables)
   "fisker": ("opendbc.car.fisker.values", "fisker_ocean_adas", (
-    OverrideTable("ICC_0x52A", "ICC_SETTINGS_OVERRIDES", None,
-                  "ICC feature settings re-sent to the ADAS module. These overrides are what enable ACC; every other " +
-                  "signal passes through from the ICC's own frame."),
     OverrideTable("ICC_0x35B", "ICC_0x35B_OVERRIDES", "ICC_0x35B_PASSTHROUGH",
                   "Surround view, BSD/DOW, park assist and auto high beam settings. With no overrides openpilot leaves " +
                   "this frame alone; camera-view requests always pass through."),
