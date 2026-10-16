@@ -29,7 +29,7 @@ const COMMAND_RATE_HZ = 30;             // POST /steer this often while armed (h
 const COMMAND_INTERVAL_MS = Math.round(1000 / COMMAND_RATE_HZ);
 const STATUS_POLL_MS = 500;             // GET /status this often
 const MAX_SEND_FAILURES = 15;           // auto-disarm after this many back-to-back POST errors (~500 ms of flakiness)
-const DEFAULT_MAX_ANGLE = 90;           // overridden by server /status
+const DEFAULT_MAX_ANGLE = 250;          // overridden by server /status
 
 const el = (id) => document.getElementById(id);
 

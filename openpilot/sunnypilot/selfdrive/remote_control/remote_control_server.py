@@ -34,11 +34,12 @@ from openpilot.common.swaglog import cloudlog
 PORT = int(os.environ.get("REMOTE_CONTROL_PORT", "8899"))
 STATIC_DIR = Path(__file__).parent / "static"
 
-# Hard angle cap (deg). The fisker ANGLE_LIMITS.max_angle is 600°, but allowing
-# the phone to request anywhere near that from a touchscreen slider is reckless
-# — hands aren't precise enough. 90° covers a full quarter-turn (sharp parking
-# maneuvers) without letting a stray finger put the wheel at lock.
-MAX_ANGLE_DEG = 90.0
+# Hard angle cap (deg). The fisker ANGLE_LIMITS.max_angle is 600° (physical
+# EPS limit on this trim); 250° gives the phone roughly ±2/3 of a full wheel
+# rotation per direction, enough for sharp parking lock-to-lock from a
+# cold start. Still below the panda hard max so a stuck finger can't put
+# the wheel to the hard stop.
+MAX_ANGLE_DEG = 250.0
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
