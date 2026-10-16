@@ -36,8 +36,9 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 # Hard angle cap (deg). The fisker ANGLE_LIMITS.max_angle is 600°, but allowing
 # the phone to request anywhere near that from a touchscreen slider is reckless
-# — hands aren't precise enough. 30° covers tight parking turns comfortably.
-MAX_ANGLE_DEG = 30.0
+# — hands aren't precise enough. 90° covers a full quarter-turn (sharp parking
+# maneuvers) without letting a stray finger put the wheel at lock.
+MAX_ANGLE_DEG = 90.0
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -99,7 +100,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         angle = MAX_ANGLE_DEG
       elif angle < -MAX_ANGLE_DEG:
         angle = -MAX_ANGLE_DEG
-      self.params.put("RemoteSteerAngle", str(angle))
+      # Convention flip: the webapp sends "drag-right = positive" because
+      # that's what a human expects from a steering input. openpilot's
+      # internal frame is left-positive (CCW = +), matching OEM EPS_SteerWhlAgSig
+      # and ADAS_LatCtrl_SteerAnReq (see fisker-ocean-port-status memory).
+      # Negate here so the stored param lands in openpilot's convention and
+      # the carcontroller can use it directly, without having to carry a
+      # magic "remote-is-reversed" flag through the control path.
+      stored_angle = -angle
+      self.params.put("RemoteSteerAngle", str(stored_angle))
       self.params.put("RemoteSteerLastUpdate", str(time.time_ns()))
       self._send(200, json.dumps({"ok": True, "angle": angle}))
 

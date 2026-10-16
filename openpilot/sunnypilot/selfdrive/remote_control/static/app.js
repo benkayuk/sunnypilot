@@ -18,11 +18,14 @@
 //     carcontroller watchdog stays fresh (otherwise the "ok we're alive but
 //     the user isn't touching" case would trigger a watchdog fallback).
 
-const COMMAND_RATE_HZ = 30;             // POST /steer this often while armed
+// Match the carcontroller's 100 Hz tick so a param write is at most ~10 ms
+// stale by the time the next tick reads it. The server + Params write is
+// ~1 ms over local wifi so this is comfortably sustainable.
+const COMMAND_RATE_HZ = 100;            // POST /steer this often while armed (heartbeat)
 const COMMAND_INTERVAL_MS = Math.round(1000 / COMMAND_RATE_HZ);
 const STATUS_POLL_MS = 500;             // GET /status this often
-const MAX_SEND_FAILURES = 3;            // auto-disarm after this many back-to-back POST errors
-const DEFAULT_MAX_ANGLE = 30;           // overridden by server /status
+const MAX_SEND_FAILURES = 10;           // auto-disarm after this many back-to-back POST errors (higher cap since we send more often)
+const DEFAULT_MAX_ANGLE = 90;           // overridden by server /status
 
 const el = (id) => document.getElementById(id);
 
@@ -144,12 +147,22 @@ function onTouchMove(ev) {
   state.touchAngle = frac * halfRange;
   state.touchActive = true;
   setAngleDisplay(state.touchAngle);
+  // Fire the POST right now instead of waiting for the next heartbeat tick.
+  // touchmove on an active drag runs at the display refresh rate (60-120 Hz),
+  // so the stream of sends is naturally capped by how fast the finger
+  // actually moves — far more responsive than a fixed 100 Hz interval.
+  // Fire-and-forget: don't await, so the touch handler can't block on
+  // a slow wifi roundtrip.
+  sendNow();
 }
 
 function onTouchEnd() {
   state.touchActive = false;
   state.touchAngle = 0;
   setAngleDisplay(0);
+  // Make the return-to-zero visible on the vehicle immediately rather than
+  // waiting up to one heartbeat interval.
+  sendNow();
 }
 
 function wireSteerTrack() {
@@ -167,29 +180,36 @@ function wireSteerTrack() {
 
 // ---------------------------------------------------------------- command loop
 
-async function sendCommand() {
+// Fire a /steer POST immediately with the current state, without awaiting
+// the response. Used both from the heartbeat interval AND from touchmove,
+// so the finger-to-wire path has at most one carcontroller-tick (~10 ms)
+// of waiting instead of one heartbeat-interval. Failures update the
+// shared watchdog counters so auto-disarm still works.
+function sendNow() {
   if (!state.armed) return;
   const angle = state.touchActive ? state.touchAngle : 0;
-  try {
-    await postJSON("/steer", {angle});
+  postJSON("/steer", {angle}).then(() => {
     state.sendFailures = 0;
     if (state.lastSendOk !== true) {
       setConnection("ok", "Connected");
       state.lastSendOk = true;
     }
-  } catch (e) {
+  }).catch(() => {
     state.sendFailures += 1;
     state.lastSendOk = false;
     setConnection("warn", `Lost (${state.sendFailures}/${MAX_SEND_FAILURES})`);
     if (state.sendFailures >= MAX_SEND_FAILURES) {
       toast("Connection lost — disarming");
-      // Fire-and-forget — if the server is actually gone, this will fail
-      // too, but the server-side watchdog + carcontroller freshness check
-      // are the real safety here. UI auto-disarms either way.
-      try { await postJSON("/disarm", {}); } catch (_) { /* ignore */ }
+      try { postJSON("/disarm", {}); } catch (_) { /* ignore */ }
       setArm(false);
     }
-  }
+  });
+}
+
+// Heartbeat tick: keeps the carcontroller's freshness watchdog fresh
+// even when the finger isn't moving. Just delegates to sendNow().
+function sendCommand() {
+  sendNow();
 }
 
 // ---------------------------------------------------------------- buttons
