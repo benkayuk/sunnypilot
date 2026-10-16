@@ -18,13 +18,17 @@
 //     carcontroller watchdog stays fresh (otherwise the "ok we're alive but
 //     the user isn't touching" case would trigger a watchdog fallback).
 
-// Match the carcontroller's 100 Hz tick so a param write is at most ~10 ms
-// stale by the time the next tick reads it. The server + Params write is
-// ~1 ms over local wifi so this is comfortably sustainable.
-const COMMAND_RATE_HZ = 100;            // POST /steer this often while armed (heartbeat)
+// Heartbeat rate. 30 Hz is plenty — the carcontroller's freshness window is
+// 300 ms, so this gives ~9× safety margin, and the panda-enforced angle
+// slew rate (250°/s at 0 m/s) means a one-tick param-write delay is well
+// under 1% of the time it takes the EPS to physically move the wheel.
+// Previously tried 100 Hz but it strained the stdlib ThreadingHTTPServer
+// (thread-per-request + per-POST LMDB write) and manifested as
+// "connection lost" flapping over wifi.
+const COMMAND_RATE_HZ = 30;             // POST /steer this often while armed (heartbeat)
 const COMMAND_INTERVAL_MS = Math.round(1000 / COMMAND_RATE_HZ);
 const STATUS_POLL_MS = 500;             // GET /status this often
-const MAX_SEND_FAILURES = 10;           // auto-disarm after this many back-to-back POST errors (higher cap since we send more often)
+const MAX_SEND_FAILURES = 15;           // auto-disarm after this many back-to-back POST errors (~500 ms of flakiness)
 const DEFAULT_MAX_ANGLE = 90;           // overridden by server /status
 
 const el = (id) => document.getElementById(id);
@@ -38,6 +42,13 @@ const state = {
   sendFailures: 0,
   statusTimer: null,
   commandTimer: null,
+  // In-flight guard: never allow more than one /steer POST in flight at
+  // once. If a POST is still waiting on a server response, newer ticks
+  // (heartbeat or touchmove) drop their send — the next completed POST
+  // will pick up the latest touchAngle immediately after. Prevents the
+  // request-pileup / "connection lost" flapping that was happening when
+  // touchmove and heartbeat raced.
+  sendInFlight: false,
 };
 
 // ---------------------------------------------------------------- net helpers
@@ -147,13 +158,12 @@ function onTouchMove(ev) {
   state.touchAngle = frac * halfRange;
   state.touchActive = true;
   setAngleDisplay(state.touchAngle);
-  // Fire the POST right now instead of waiting for the next heartbeat tick.
-  // touchmove on an active drag runs at the display refresh rate (60-120 Hz),
-  // so the stream of sends is naturally capped by how fast the finger
-  // actually moves — far more responsive than a fixed 100 Hz interval.
-  // Fire-and-forget: don't await, so the touch handler can't block on
-  // a slow wifi roundtrip.
-  sendNow();
+  // No POST from here — the 30 Hz heartbeat will pick up state.touchAngle
+  // within ~33 ms, which is well below the panda-enforced slew rate (the
+  // physical limit on how fast the EPS can move the wheel anyway). Firing
+  // on every touchmove event used to send 60-120 Hz on top of the heartbeat
+  // and overwhelmed the stdlib HTTP server, surfacing as "connection lost"
+  // flapping.
 }
 
 function onTouchEnd() {
@@ -180,21 +190,26 @@ function wireSteerTrack() {
 
 // ---------------------------------------------------------------- command loop
 
-// Fire a /steer POST immediately with the current state, without awaiting
-// the response. Used both from the heartbeat interval AND from touchmove,
-// so the finger-to-wire path has at most one carcontroller-tick (~10 ms)
-// of waiting instead of one heartbeat-interval. Failures update the
-// shared watchdog counters so auto-disarm still works.
+// Fire a /steer POST with the current state, non-blocking. Called from the
+// heartbeat interval AND from touchEnd (release-to-zero). Does NOT fire
+// from touchmove — the 33 ms heartbeat picks up the latest touchAngle
+// anyway, and firing on every touchmove event (60-120 Hz) was overwhelming
+// the server. Guards against multiple in-flight POSTs so backpressure can't
+// cause pileup over a flaky wifi link.
 function sendNow() {
   if (!state.armed) return;
+  if (state.sendInFlight) return;  // drop; next tick will carry a fresher value
+  state.sendInFlight = true;
   const angle = state.touchActive ? state.touchAngle : 0;
   postJSON("/steer", {angle}).then(() => {
+    state.sendInFlight = false;
     state.sendFailures = 0;
     if (state.lastSendOk !== true) {
       setConnection("ok", "Connected");
       state.lastSendOk = true;
     }
   }).catch(() => {
+    state.sendInFlight = false;
     state.sendFailures += 1;
     state.lastSendOk = false;
     setConnection("warn", `Lost (${state.sendFailures}/${MAX_SEND_FAILURES})`);
