@@ -20,6 +20,7 @@ from opendbc.car.car_helpers import get_car, interfaces
 from opendbc.car.interfaces import CarInterfaceBase, RadarInterfaceBase
 from openpilot.selfdrive.pandad import can_capnp_to_list, can_list_to_can_capnp
 from openpilot.selfdrive.car.cruise import VCruiseHelper
+from openpilot.selfdrive.car.secoc import configure_secoc_key
 from openpilot.selfdrive.car.helpers import convert_carControlSP, convert_to_capnp
 
 from openpilot.sunnypilot.mads.helpers import set_alternative_experience, set_car_specific_params
@@ -145,25 +146,9 @@ class Car:
       self.can_overrides.poll(self.params)
 
     if self.CP.secOcRequired:
-      # Copy user key if available
-      try:
-        with open("/cache/params/SecOCKey") as f:
-          user_key = f.readline().strip()
-          if len(user_key) == 32:
-            self.params.put("SecOCKey", user_key, block=True)
-      except Exception:
-        pass
-
-      secoc_key = self.params.get("SecOCKey")
-      if secoc_key is not None:
-        saved_secoc_key = bytes.fromhex(secoc_key.strip())
-        if len(saved_secoc_key) == 16:
-          self.CP.secOcKeyAvailable = True
-          self.CI.CS.secoc_key = saved_secoc_key
-          if controller_available:
-            self.CI.CC.secoc_key = saved_secoc_key
-        else:
-          cloudlog.warning("Saved SecOC key is invalid")
+      # Before the initial CarParams write: controls reads availability at startup.
+      # Panda remains in diagnostic safety until CI.init and ControlsReady below.
+      configure_secoc_key(self.CI, self.params, *self.can_callbacks, controller_available=controller_available, replay=REPLAY)
 
     # Write previous route's CarParams
     prev_cp = self.params.get("CarParamsPersistent")
