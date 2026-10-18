@@ -119,6 +119,8 @@ def main():
   say("Subscribing to CAN bus 0 (ADASBUS) via cereal, plus cereal state topics...")
 
   cp = CANParser(ADAS_DBC, MESSAGES, ADAS_BUS)
+  # conflate=False so we see every CAN event (buttons at 50 Hz can get
+  # coalesced away otherwise).
   can_sock = messaging.sub_sock("can", conflate=False, timeout=50)
 
   sm = messaging.SubMaster([
@@ -151,10 +153,15 @@ def main():
 
   try:
     while True:
-      # Drain CAN
-      can_msgs = messaging.drain_sock_raw(can_sock, wait_for_one=False)
-      if can_msgs:
-        cp.update_strings(can_msgs)
+      # Drain CAN and reshape into the (log_mono_time, [(addr, dat, src), ...])
+      # tuples that opendbc.can.parser.CANParser.update() expects.
+      # (The previous update_strings-of-raw-capnp-bytes API was removed.)
+      can_packets = []
+      for evt in messaging.drain_sock(can_sock, wait_for_one=False):
+        frames = [(c.address, c.dat, c.src) for c in evt.can]
+        can_packets.append((evt.logMonoTime, frames))
+      if can_packets:
+        cp.update(can_packets)
         for name, msg in SIGNALS:
           try:
             v = cp.vl[msg][name]
