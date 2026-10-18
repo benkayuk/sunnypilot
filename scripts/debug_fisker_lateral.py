@@ -42,7 +42,11 @@ import datetime
 import time
 from pathlib import Path
 
-import cereal.messaging as messaging
+# Use the sunnypilot-layout imports. The top-level `cereal` package on
+# this device (if any) is a stale site-packages copy with an older API
+# that doesn't export sub_sock; the real cereal we want is the one
+# shipped under openpilot/cereal/.
+from openpilot.cereal import messaging
 from opendbc.can.parser import CANParser
 
 
