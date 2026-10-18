@@ -123,6 +123,17 @@ def main():
   # — 'can' is the RX side. Build a dedicated parser so we can see what the
   # carcontroller is actually transmitting on the wire. Same DBC, same bus.
   cp_tx = CANParser(ADAS_DBC, [("ADAS_0x1D0", 0), ("ADAS_0x1C0", 0)], ADAS_BUS)
+  # OEM's OWN 0x1D0 on bus 2. While we're engaged the panda blocks these from
+  # reaching the EPS (bus 2 -> bus 0), but the OEM ADAS keeps transmitting them
+  # on bus 2 and pandad still reports them. This is the GROUND TRUTH for the
+  # SecOC counter/reset the EPS expects: if our injected 0x1D0 (cp_tx, bus 0)
+  # ever diverges from OEM's (cp_oem, bus 2), that divergence is exactly what
+  # the EPS rejects. Comparing the two frame-by-frame pinpoints the reset
+  # boundary race.
+  cp_oem = CANParser(ADAS_DBC, [("ADAS_0x1D0", 0)], 2)
+  # GW SecOC sync (0x20) carries the trip + reset counters. Watch the reset
+  # field so we can time the ~1 Hz reset boundary against the EPS fault.
+  cp_gw = CANParser(ADAS_DBC, [("GW_Syn_All", 0)], 0)
   # conflate=False so we see every CAN event (buttons at 50 Hz can get
   # coalesced away otherwise).
   can_sock = messaging.sub_sock("can", conflate=False, timeout=50)
@@ -164,6 +175,8 @@ def main():
   last_ctrls_state = None
   last_params = {}
   last_snapshot = 0.0
+  last_gw_reset = None       # GW_Syn_All reset counter, for timing the ~1 Hz boundary
+  last_divergence = None     # (ctr_gap, alv_gap, oem_resetbits, our_resetbits) ours-vs-OEM
   SNAPSHOT_PERIOD = 10.0  # s — print a full state dump this often even without transitions
 
   mads_state_names = ["disabled", "paused", "enabled", "softDisabling", "overriding"]
@@ -219,6 +232,49 @@ def main():
 
       if can_packets:
         cp.update(can_packets)
+        cp_oem.update(can_packets)   # OEM's 0x1D0 on bus 2 (ground truth)
+        cp_gw.update(can_packets)    # GW_Syn_All reset counter (bus 0)
+
+        # --- GW reset-boundary timing -------------------------------------
+        # Log the SecOC reset counter whenever it increments. This is the ~1 Hz
+        # boundary where the EPS zeroes the per-window msg counter. Correlate
+        # its timestamp with the OEM-vs-ours divergence and the EPS fault below.
+        try:
+          gw_rst = (int(cp_gw.vl["GW_Syn_All"]["Syn_RstCntrVal_Byte0_All"]) << 16) \
+                 | (int(cp_gw.vl["GW_Syn_All"]["Syn_RstCntrVal_Byte1_All"]) << 8) \
+                 | int(cp_gw.vl["GW_Syn_All"]["Syn_RstCntrVal_Byte2_All"])
+        except (KeyError, AttributeError):
+          gw_rst = None
+        if gw_rst is not None and gw_rst != last_gw_reset:
+          if last_gw_reset is not None:
+            say(f"GW  Syn_RstCntr  {last_gw_reset} -> {gw_rst}   (reset boundary)", loud=True)
+          last_gw_reset = gw_rst
+
+        # --- OEM(bus2) vs ours(sendcan): the definitive continuation check ---
+        # While we inject, our 0x1D0 should BE exactly what OEM would have sent
+        # (same SSecOC counter byte + same alive). Any divergence is precisely
+        # what the EPS rejects. Only meaningful while we're actually TXing.
+        try:
+          oem_byte = int(cp_oem.vl["ADAS_0x1D0"]["ADAS_1D0_SSecOC_Fresh_Byte0"])
+          oem_alv = int(cp_oem.vl["ADAS_0x1D0"]["ADAS_1D0_AliveCounter"])
+          our_byte = int(cp_tx.vl["ADAS_0x1D0"]["ADAS_1D0_SSecOC_Fresh_Byte0"])
+          our_alv = int(cp_tx.vl["ADAS_0x1D0"]["ADAS_1D0_AliveCounter"])
+        except (KeyError, AttributeError):
+          oem_byte = oem_alv = our_byte = our_alv = None
+        if our_byte is not None and last_cc_lat_active:
+          # Report the signed gap in the SSecOC counter (top 6 bits) and alive.
+          oem_ctr, our_ctr = oem_byte >> 2, our_byte >> 2
+          ctr_gap = ((our_ctr - oem_ctr + 32) % 64) - 32       # signed, [-32,31]
+          alv_gap = ((our_alv - oem_alv + 7) % 15) - 7         # signed, [-7,7]
+          rb_oem, rb_our = oem_byte & 0x3, our_byte & 0x3
+          cur_div = (ctr_gap, alv_gap, rb_oem, rb_our)
+          if cur_div != last_divergence:
+            tag = "OK (identical)" if cur_div == (0, 0, rb_oem, rb_oem) else "DIVERGED"
+            say(f"CMP ours vs OEM(bus2): ctrGap={ctr_gap:+d} alvGap={alv_gap:+d} "
+                f"resetBits oem={rb_oem} ours={rb_our}  [{tag}]",
+                loud=(tag != "OK (identical)"))
+            last_divergence = cur_div
+
         for name, msg in SIGNALS:
           try:
             v = cp.vl[msg][name]
