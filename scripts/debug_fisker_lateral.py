@@ -119,9 +119,14 @@ def main():
   say("Subscribing to CAN bus 0 (ADASBUS) via cereal, plus cereal state topics...")
 
   cp = CANParser(ADAS_DBC, MESSAGES, ADAS_BUS)
+  # Our TX frames (0x1D0 + 0x1C0 at 100 Hz) go out over 'sendcan', NOT 'can'
+  # — 'can' is the RX side. Build a dedicated parser so we can see what the
+  # carcontroller is actually transmitting on the wire. Same DBC, same bus.
+  cp_tx = CANParser(ADAS_DBC, [("ADAS_0x1D0", 0), ("ADAS_0x1C0", 0)], ADAS_BUS)
   # conflate=False so we see every CAN event (buttons at 50 Hz can get
   # coalesced away otherwise).
   can_sock = messaging.sub_sock("can", conflate=False, timeout=50)
+  sendcan_sock = messaging.sub_sock("sendcan", conflate=False, timeout=50)
 
   sm = messaging.SubMaster([
     "carState", "carControl", "controlsState",
@@ -135,6 +140,18 @@ def main():
   except Exception as e:  # noqa: BLE001
     say(f"warning: couldn't open Params ({e}); FiskerMadsArmed/RemoteControlEnabled won't be logged")
     params = None
+
+  # TX signals we track for diagnostic — our own counters and request bits.
+  TX_SIGNALS = [
+    ("ADAS_1D0_AliveCounter",     "ADAS_0x1D0"),
+    ("ADAS_1D0_SSecOC_Fresh_Byte0", "ADAS_0x1D0"),
+    ("ADAS_LatCtrl_SteerAnReq",   "ADAS_0x1D0"),
+    ("ADAS_1C0_AliveCounter",     "ADAS_0x1C0"),
+    ("ADAS_LatCtrl_Req",          "ADAS_0x1C0"),
+    ("ADAS_LatCtrl_Sts",          "ADAS_0x1C0"),
+    ("ADAS_LatCtrl_Typ",          "ADAS_0x1C0"),
+  ]
+  last_tx = {name: None for name, _ in TX_SIGNALS}
 
   last_can = {name: None for name, _ in SIGNALS}
   last_mads_state = None
@@ -160,6 +177,46 @@ def main():
       for evt in messaging.drain_sock(can_sock, wait_for_one=False):
         frames = [(c.address, c.dat, c.src) for c in evt.can]
         can_packets.append((evt.logMonoTime, frames))
+      # Also drain our own TX side ('sendcan') so we can print the
+      # ADAS_1D0 / ADAS_1C0 counter values we are actually transmitting.
+      # This is what EPS sees on the wire for lateral — if our alive /
+      # SSecOC counters are miscomputed, this is where you can tell.
+      tx_packets = []
+      for evt in messaging.drain_sock(sendcan_sock, wait_for_one=False):
+        frames = [(c.address, c.dat, c.src) for c in evt.sendcan]
+        tx_packets.append((evt.logMonoTime, frames))
+      if tx_packets:
+        cp_tx.update(tx_packets)
+        for name, msg in TX_SIGNALS:
+          try:
+            v = cp_tx.vl[msg][name]
+          except (KeyError, AttributeError):
+            continue
+          if v is None:
+            continue
+          prev = last_tx[name]
+          if prev is None:
+            last_tx[name] = v
+            continue
+          # Transitions on Req/Sts/Typ are loud; counters we only print on
+          # non-monotonic skips (otherwise they'd flood every tick).
+          loud = name in ("ADAS_LatCtrl_Req", "ADAS_LatCtrl_Sts", "ADAS_LatCtrl_Typ")
+          if "AliveCounter" in name or "SSecOC" in name:
+            # Expected diff per 10 ms = 1 (modulo 15 for alive, modulo 256
+            # on the SSecOC byte — the on-wire fresh byte is OEM_wire<<2
+            # per the DBC bit layout, so a +1 counter is +4 on the byte).
+            # Flag anything that isn't a steady +1 (+4 for SSecOC byte).
+            expected_step = 4 if "SSecOC" in name else 1
+            modulus = 256 if "SSecOC" in name else 15
+            diff = (int(v) - int(prev)) % modulus
+            if diff != expected_step:
+              say(f"TX  {name:30s}  {int(prev):>4} -> {int(v):<4}  (STEP {diff} ≠ {expected_step})", loud=True)
+            last_tx[name] = v
+            continue
+          if v != prev:
+            say(f"TX  {name:30s}  {pretty_val(prev):>6} -> {pretty_val(v)}", loud=loud)
+            last_tx[name] = v
+
       if can_packets:
         cp.update(can_packets)
         for name, msg in SIGNALS:
