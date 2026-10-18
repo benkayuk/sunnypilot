@@ -49,7 +49,8 @@ from opendbc.can.parser import CANParser
 ADAS_DBC = "fisker_ocean_adas"
 ADAS_BUS = 0  # ADASBUS lives on bus 0 in the fisker port (see fisker-ocean-bus-scope memory)
 
-# (signal_name, message_name) — CANParser will pick these out of the ADAS DBC.
+# (signal_name, message_name) — the message is what we subscribe to in the
+# CANParser; we grab the signal out of cp.vl[message_name][signal_name].
 SIGNALS = [
   # MFSS buttons — WHICH button the user actually pressed. See
   # fisker-ocean-mfss-buttons memory for the vehicle-verified mapping.
@@ -76,6 +77,18 @@ SIGNALS = [
   ("VCU_Sts_CC_ICC",            "VCU_0x358"),
 ]
 
+# CANParser wants a list of (message_name, polling_frequency_hz) tuples (or
+# just message names). We derive it from SIGNALS so there's one source of
+# truth — add a signal above and this list updates. 0 Hz = don't warn on
+# missing messages, which is what we want (some msgs are faulted / absent).
+MESSAGES = []
+_seen = set()
+for _signame, _msgname in SIGNALS:
+  if _msgname in _seen:
+    continue
+  _seen.add(_msgname)
+  MESSAGES.append((_msgname, 0))
+
 
 def fmt_ts() -> str:
   return datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
@@ -101,7 +114,7 @@ def main():
   say(f"=== fisker lateral debug — writing to {log_path} ===", loud=True)
   say("Subscribing to CAN bus 0 (ADASBUS) via cereal, plus cereal state topics...")
 
-  cp = CANParser(ADAS_DBC, SIGNALS, ADAS_BUS)
+  cp = CANParser(ADAS_DBC, MESSAGES, ADAS_BUS)
   can_sock = messaging.sub_sock("can", conflate=False, timeout=50)
 
   sm = messaging.SubMaster([
@@ -139,7 +152,10 @@ def main():
       if can_msgs:
         cp.update_strings(can_msgs)
         for name, msg in SIGNALS:
-          v = cp.vl.get(msg, {}).get(name)
+          try:
+            v = cp.vl[msg][name]
+          except (KeyError, AttributeError):
+            continue
           if v is None:
             continue
           prev = last_can[name]
