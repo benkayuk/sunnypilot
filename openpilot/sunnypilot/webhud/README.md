@@ -51,13 +51,16 @@ serves the page as well (`/`, `/vendor/`, `/models/`, `/dbc/` from that checkout
 `GET /map/tile/<lat>/<lon>/<name>` (an OSM road tile, fetched into mapd's folder on first use),
 `GET /map/features/<klat>/<klon>`, `POST /map/prefetch {lat, lon, radius_km}`, `GET /map/status`,
 `PUT /api/upload?name=<file>` (raw rlog/qlog body), `GET|PUT /api/params` (personality, experimental
-mode, units), `GET|PUT|DELETE /api/overrides`. Static: `/dbc/` (the ADASBUS subset and the radar DBC,
+mode, units), `GET|PUT|DELETE /api/overrides`, `GET /api/ssh` (SSH on or off, the keys let in, by
+fingerprint), `POST|DELETE /api/ssh/authorize {publicKey}` (add or remove one OpenSSH public key line in
+`GithubSshKeys`, beside the keys already there; adding also turns SSH on: the Oceanfront View app puts its own
+key on the comma this way, then manages it over SSH as `comma`). Static: `/dbc/` (the ADASBUS subset and the radar DBC,
 which the page decodes with), and the page with `WEBHUD_PAGE_DIR` set. WebSocket `/ws`: the server sends
 `{type: hello}` then `{type: tick, data: {now, reset?, brand, can: [[t, [[addr, bus, hex], ...]], ...],
 op: [[service, t, extract], ...], mode, replay, server}}` at 20 Hz (the first tick for a new viewer is a
 snapshot of the latest frame of every message, with `reset`); the client sends `{type: replay, ...}`.
 
-Writes are accepted from private addresses only, never cross-origin, and CAN override changes and
+Writes are accepted from private addresses only, never cross-origin, and CAN override changes, SSH keys and
 replay are refused while the car is moving (replay also stops itself if the car starts moving).
 
 ## Development
