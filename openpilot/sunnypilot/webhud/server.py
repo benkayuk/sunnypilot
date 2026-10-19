@@ -21,7 +21,10 @@ names an Oceanfront View checkout, which it then serves for a plain browser on a
 Dev on a PC:  python -m openpilot.sunnypilot.webhud.server --replay /path/to/rlog.zst
 """
 import argparse
+import base64
+import binascii
 import gzip
+import hashlib
 import ipaddress
 import json
 import mimetypes
@@ -54,7 +57,7 @@ Oceanfront View app (https://github.com/moistpope/oceanfront-view): on the car's
 PC run `python3 serve.py --bridge <this host>` from its checkout and open http://localhost:18088, or set
 WEBHUD_PAGE_DIR to that checkout and this process serves the page too.
 
-Endpoints: /api/status, /api/routes, /api/replay, /api/upload, /api/params, /api/overrides, /map/...,
+Endpoints: /api/status, /api/routes, /api/replay, /api/upload, /api/params, /api/overrides, /api/ssh, /map/...,
 /dbc/fisker_ocean_adas_world.dbc, /dbc/fisker_ocean_mrr.dbc, and the WebSocket at /ws.
 """
 DEFAULT_PORT = int(os.getenv("WEBHUD_PORT", "8088"))
@@ -733,6 +736,92 @@ def api_params_put(h: HudHandler, q) -> None:
   api_params_get(h, q)
 
 
+# ---- SSH keys: the Oceanfront View app's key, for managing the comma over SSH -----------------------------
+# The app makes its own key pair (in the head unit's keystore) and asks for its public half to be let in. It goes
+# into GithubSshKeys beside whatever is there (the comma's sshd reads that param for `comma`), and SSH is turned on.
+# Like every write here: from the local network only, never cross-origin, and not while the car is moving.
+
+SSH_KEY_TYPES = ("ssh-ed25519", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521", "ssh-rsa")
+SSH_COMMENT_OK = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._@-")
+
+
+def parse_ssh_key(text) -> tuple[str, bytes, str]:
+  """(type, key blob, comment) of one OpenSSH public key line; ValueError for anything else."""
+  if not isinstance(text, str) or "\n" in text.strip() or len(text) > 4096:
+    raise ValueError("one public key line expected")
+  parts = text.strip().split()
+  if len(parts) < 2 or parts[0] not in SSH_KEY_TYPES:
+    raise ValueError(f"key type must be one of {', '.join(SSH_KEY_TYPES)}")
+  try:
+    blob = base64.b64decode(parts[1], validate=True)
+  except (binascii.Error, ValueError):
+    raise ValueError("the key isn't base64") from None
+  name = parts[0].encode()
+  if blob[:4] != len(name).to_bytes(4, "big") or blob[4:4 + len(name)] != name:
+    raise ValueError("the key blob doesn't match its type")
+  comment = "".join(c for c in " ".join(parts[2:]) if c in SSH_COMMENT_OK)[:64]
+  return parts[0], blob, comment
+
+
+def ssh_fingerprint(blob: bytes) -> str:
+  return "SHA256:" + base64.b64encode(hashlib.sha256(blob).digest()).decode().rstrip("=")
+
+
+def _ssh_keys(params) -> list[str]:
+  raw = params.get("GithubSshKeys")
+  if isinstance(raw, bytes):
+    raw = raw.decode("utf-8", "replace")
+  return [line.strip() for line in (raw or "").splitlines() if line.strip()]
+
+
+def _ssh_blob(line: str) -> bytes | None:
+  try:
+    return parse_ssh_key(line)[1]
+  except ValueError:
+    return None
+
+
+def api_ssh_get(h: "HudHandler", q) -> None:
+  keys = []
+  for line in _ssh_keys(h.server.params):
+    try:
+      kind, blob, comment = parse_ssh_key(line)
+      keys.append({"type": kind, "fingerprint": ssh_fingerprint(blob), "comment": comment})
+    except ValueError:
+      keys.append({"type": "unknown", "fingerprint": None, "comment": ""})
+  try:
+    enabled = bool(h.server.params.get_bool("SshEnabled"))
+  except Exception:
+    enabled = None
+  h._json({"enabled": enabled, "user": "comma", "port": 22, "keys": keys})
+
+
+def api_ssh_authorize(h: "HudHandler", q) -> None:
+  if h.server.engine.monitor.moving:
+    return h._error(409, "not while the car is moving")
+  kind, blob, comment = parse_ssh_key(h._json_body().get("publicKey"))
+  lines = _ssh_keys(h.server.params)
+  if not any(_ssh_blob(line) == blob for line in lines):
+    lines.append(f"{kind} {base64.b64encode(blob).decode()} {comment or 'oceanfront-view'}")
+    h.server.params.put("GithubSshKeys", "\n".join(lines))
+    cloudlog.warning(f"webhud: SSH key {ssh_fingerprint(blob)} ({comment}) authorized by {h.client_address[0]}")
+  h.server.params.put_bool("SshEnabled", True)
+  api_ssh_get(h, q)
+
+
+def api_ssh_revoke(h: "HudHandler", q) -> None:
+  _, blob, _ = parse_ssh_key(h._json_body().get("publicKey"))
+  lines = _ssh_keys(h.server.params)
+  keep = [line for line in lines if _ssh_blob(line) != blob]
+  if len(keep) != len(lines):
+    if keep:
+      h.server.params.put("GithubSshKeys", "\n".join(keep))
+    else:
+      h.server.params.remove("GithubSshKeys")
+    cloudlog.warning(f"webhud: SSH key {ssh_fingerprint(blob)} revoked by {h.client_address[0]}")
+  api_ssh_get(h, q)
+
+
 class OverridesApi:
   def __init__(self, params, builder: StreamBuilder, monitor: _VehicleMonitor):
     from openpilot.sunnypilot.selfdrive.car.can_overrides import CanOverrides
@@ -837,6 +926,9 @@ ROUTES = {
   ("GET", "/api/overrides"): api_overrides_get,
   ("PUT", "/api/overrides"): api_overrides_put,
   ("DELETE", "/api/overrides"): api_overrides_delete,
+  ("GET", "/api/ssh"): api_ssh_get,
+  ("POST", "/api/ssh/authorize"): api_ssh_authorize,
+  ("DELETE", "/api/ssh/authorize"): api_ssh_revoke,
 }
 
 

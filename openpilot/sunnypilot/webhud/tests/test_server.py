@@ -149,6 +149,27 @@ class TestServer(OpenpilotTestCase):
     assert self.request("PUT", "/api/params", {"LongitudinalPersonality": 7})[0] == 400
     assert self.request("PUT", "/api/params", {"DisableUpdates": True})[0] == 400
 
+  def test_ssh_keys(self):
+    # the Oceanfront View app's key joins whatever keys are there, once, and SSH comes on; revoking takes only it
+    blob = b"\x00\x00\x00\x13ecdsa-sha2-nistp256" + b"\x00\x00\x00\x08nistp256" + b"\x00\x00\x00\x41\x04" + bytes(64)
+    key = "ecdsa-sha2-nistp256 " + base64.b64encode(blob).decode() + " oceanfront-view"
+    other = "ssh-ed25519 " + base64.b64encode(b"\x00\x00\x00\x0bssh-ed25519" + b"\x00\x00\x00\x20" + bytes(32)).decode() + " me@laptop"
+    self.params.put("GithubSshKeys", other)
+    for _ in range(2):
+      status, body, _ = self.request("POST", "/api/ssh/authorize", {"publicKey": key})
+      st = json.loads(body)
+      assert status == 200 and st["enabled"] is True and [k["comment"] for k in st["keys"]] == ["me@laptop", "oceanfront-view"]
+    assert self.params.get("GithubSshKeys").splitlines() == [other, key]
+    for bad in ("ssh-dss AAAA", "ecdsa-sha2-nistp256 not-base64!", "ssh-ed25519 " + base64.b64encode(blob).decode(), key + "\n" + other, None):
+      assert self.request("POST", "/api/ssh/authorize", {"publicKey": bad})[0] == 400, bad
+    assert self.request("POST", "/api/ssh/authorize", {"publicKey": key}, {"Origin": "http://evil.example"})[0] == 403
+    with mock.patch.object(self.engine.monitor, "tick"):   # the engine thread would read the (absent) car again
+      self.engine.monitor.moving = True
+      assert self.request("POST", "/api/ssh/authorize", {"publicKey": key})[0] == 409
+      self.engine.monitor.moving = False
+    status, body, _ = self.request("DELETE", "/api/ssh/authorize", {"publicKey": key})
+    assert status == 200 and self.params.get("GithubSshKeys") == other
+
   def test_websocket_streams_demo_ticks(self):
     sock = socket.create_connection(("127.0.0.1", self.port), timeout=10)
     key = base64.b64encode(os.urandom(16)).decode()
