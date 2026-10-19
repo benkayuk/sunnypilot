@@ -78,6 +78,7 @@ PARAM_ALLOWLIST: dict[str, tuple[type, Callable[[int], bool] | None]] = {
   "LongitudinalPersonality": (int, lambda v: v in (0, 1, 2)),
   "ExperimentalMode": (bool, None),
   "IsMetric": (bool, None),
+  "FiskerACCAutoSpeed": (bool, None),   # these two are the 0x52A spoof's baseline; ICC_0x52A overrides win
   "FiskerACCTerrain": (bool, None),
 }
 

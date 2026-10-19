@@ -24,38 +24,44 @@ class TestCanOverrides(OpenpilotTestCase):
   def setUp(self):
     super().setUp()
     self.saved = dict(values.ICC_0x35B_OVERRIDES)
+    self.saved_52a = dict(values.ICC_0x52A_OVERRIDES)
     self.ov = CanOverrides.for_brand("fisker")
 
   def tearDown(self):
     values.ICC_0x35B_OVERRIDES.clear()
     values.ICC_0x35B_OVERRIDES.update(self.saved)
+    values.ICC_0x52A_OVERRIDES.clear()
+    values.ICC_0x52A_OVERRIDES.update(self.saved_52a)
     super().tearDown()
 
   def test_unsupported_brand(self):
     assert CanOverrides.for_brand("toyota") is None
     assert CanOverrides.for_brand(None) is None
 
-  def test_only_0x35b_is_editable(self):
-    # the 0x52A table is gone: ACC settings are a fixed spoof with on-device toggles, not a CAN override
-    assert [t.message for t in self.ov.tables] == ["ICC_0x35B"]
-    assert self.ov.passthrough(self.ov.tables[0]) == values.ICC_0x35B_PASSTHROUGH
+  def test_tables(self):
+    # 0x52A: the ACC settings the spoof applies (the HUD's Assist settings); 0x35B: park assist, BSD and the rest
+    assert [t.message for t in self.ov.tables] == ["ICC_0x52A", "ICC_0x35B"]
+    assert self.ov.passthrough(self.ov.tables[0]) == values.ICC_0x52A_PASSTHROUGH
+    assert self.ov.passthrough(self.ov.tables[1]) == values.ICC_0x35B_PASSTHROUGH
 
   def test_defaults_are_the_code_values(self):
-    assert self.ov.defaults == {"ICC_0x35B": self.saved}
-    assert self.ov.live() == {"ICC_0x35B": self.saved}
+    assert self.ov.defaults == {"ICC_0x52A": self.saved_52a, "ICC_0x35B": self.saved}
+    assert self.ov.live() == {"ICC_0x52A": self.saved_52a, "ICC_0x35B": self.saved}
+    assert self.saved_52a == {"ICCACCSwt": 1, "ICCACCFuncTyp": 2, "ICCACCSpdStepSize": 1, "ICCLaneTrajectorySetting": 1}
 
   def test_validate(self):
     clean, errors = self.ov.validate({
       "ICC_0x35B": {"ICC_BSDSetting": 2, "ICC_APA_Setting": 99, "ICC_BSD_Sensitivity": 1.5, "ICC_ViewReq": 2,
                     "ICC_DOW_Setting": True, "NotASignal": 1},
-      "ICC_0x52A": {"ICC_ACCSwt": 1},
+      "ICC_0x52A": {"ICCACCSpdLimOffs": 7.5, "ICCACCSpdLimOffsTyp": 2, "ICCACCSwt": 4, "ICCACCTiGapCfm": 1, "ICC_0x52AAliveCounter": 3},
       "ADAS_0x31C": {"ADAS_TiGapSet_ACC": 1},
     })
-    assert clean == {"ICC_0x35B": {"ICC_BSDSetting": 2}}
+    assert clean == {"ICC_0x35B": {"ICC_BSDSetting": 2}, "ICC_0x52A": {"ICCACCSpdLimOffs": 7.5, "ICCACCSpdLimOffsTyp": 2}}
     text = " | ".join(errors)
-    for needle in ("ICC_APA_Setting: 99 outside", "ICC_BSD_Sensitivity: 1.5 outside", "ICC_ViewReq: always passed through",
+    for needle in ("ICCACCSwt: 4 outside", "ICCACCTiGapCfm: always passed through", "ICC_0x52AAliveCounter: always passed through",
+                   "ICC_APA_Setting: 99 outside", "ICC_BSD_Sensitivity: 1.5 outside", "ICC_ViewReq: always passed through",
                    "ICC_DOW_Setting: value must be a number", "NotASignal: unknown signal",
-                   "ICC_0x52A: not an overridable message", "ADAS_0x31C: not an overridable message"):
+                   "ADAS_0x31C: not an overridable message"):
       assert needle in text, needle
 
   def test_protected_suffixes_are_locked(self):
@@ -76,10 +82,12 @@ class TestCanOverrides(OpenpilotTestCase):
       assert f"{name}: always passed through" in text, name
 
   def test_resolve_replaces_per_message(self):
-    assert self.ov.resolve({"ICC_0x35B": {"ICC_BSDSetting": 3}}) == {"ICC_0x35B": {"ICC_BSDSetting": 3}}  # stored message fully replaces defaults
-    assert self.ov.resolve({"ICC_0x35B": {}}) == {"ICC_0x35B": {}}                                       # ... down to nothing: frame left alone
-    assert self.ov.resolve(None) == {"ICC_0x35B": self.saved}                                           # missing message keeps code defaults
-    assert self.ov.resolve({"ICC_0x52A": {"ICC_ACCSwt": 1}}) == {"ICC_0x35B": self.saved}               # unknown message is ignored
+    acc = self.saved_52a
+    assert self.ov.resolve({"ICC_0x35B": {"ICC_BSDSetting": 3}}) == {"ICC_0x52A": acc, "ICC_0x35B": {"ICC_BSDSetting": 3}}  # stored message fully replaces defaults
+    assert self.ov.resolve({"ICC_0x35B": {}}) == {"ICC_0x52A": acc, "ICC_0x35B": {}}                    # ... down to nothing: frame left alone
+    assert self.ov.resolve(None) == {"ICC_0x52A": acc, "ICC_0x35B": self.saved}                         # missing message keeps code defaults
+    assert self.ov.resolve({"ICC_0x52A": {"ICCACCSwt": 2}}) == {"ICC_0x52A": {"ICCACCSwt": 2}, "ICC_0x35B": self.saved}
+    assert self.ov.resolve({"ADAS_0x31C": {"ADAS_TiGapSet_ACC": 1}}) == {"ICC_0x52A": acc, "ICC_0x35B": self.saved}   # unknown message is ignored
 
   def test_apply_mutates_the_dict_carcontroller_reads(self):
     target = values.ICC_0x35B_OVERRIDES
@@ -89,6 +97,10 @@ class TestCanOverrides(OpenpilotTestCase):
     assert target == {"ICC_BSDSetting": 2, "ICC_DOW_Setting": 2}
     self.ov.apply({"ICC_0x35B": {}})
     assert target == {} and not carcontroller.ICC_0x35B_OVERRIDES   # empty: carcontroller stops relaying 0x35B
+    acc = values.ICC_0x52A_OVERRIDES
+    assert fiskercan.ICC_0x52A_OVERRIDES is acc
+    self.ov.apply({"ICC_0x52A": {"ICCACCSwt": 2}})
+    assert fiskercan.ICC_0x52A_OVERRIDES is acc and acc == {"ICCACCSwt": 2}
 
   def test_poll_applies_only_on_change(self):
     params = FakeParams()
@@ -130,3 +142,24 @@ class TestCanOverrides(OpenpilotTestCase):
     out = msg.decode(data)
     assert out["ICC_BSDSetting"] == 3 and out["ICC_EnbLnChgAsst"] == 0                                   # overrides win
     assert out["ICC_ViewReq"] == 4 and out["ICC_0x35B_Undoc_Byte0"] == 0xA5 and out["ICC_APA_Setting"] == 1   # the rest is the ICC's
+
+  def test_acc_spoof_packs_overrides(self):
+    from opendbc.can import CANPacker
+    from opendbc.car import Bus
+    from opendbc.car.fisker.values import CAR, DBC
+    can = fiskercan.FiskerCAN(None, CANPacker(DBC[CAR.FISKER_OCEAN][Bus.pt]))
+    msg = self.ov.dbc.by_name["ICC_0x52A"]
+    icc = dict.fromkeys(msg.signals, 0)
+    icc.update({"ICC_0x52AAliveCounter": 9, "ICCACCSpdLimOffs": 2.5, "ICCACCSpdLimOffsTyp": 1, "ICCACCTiGapCfm": 1, "ICC_LKASetting": 2})
+
+    out = msg.decode(can.create_icc_spoof_0x52a(icc)[1])     # code defaults: ACC on, the ICC's offset
+    assert (out["ICCACCSwt"], out["ICCACCFuncTyp"], out["ICCACCAutoSpdSts"], out["ICCACCTerrainSetting"]) == (1, 2, 1, 0)
+    assert (out["ICCACCSpdLimOffs"], out["ICCACCSpdLimOffsTyp"]) == (2.5, 1)
+
+    # what the HUD's Assist settings store: ACC off, auto speed off over the toggle, terrain on, +7.5 fixed
+    self.ov.apply(self.ov.resolve({"ICC_0x52A": {**self.saved_52a, "ICCACCSwt": 2, "ICCACCAutoSpdSts": 0, "ICCACCTerrainSetting": 1,
+                                                 "ICCACCSpdLimOffsTyp": 2, "ICCACCSpdLimOffs": 7.5}}))
+    out = msg.decode(can.create_icc_spoof_0x52a(icc, acc_auto_speed=True, terrain_setting=False)[1])
+    assert (out["ICCACCSwt"], out["ICCACCAutoSpdSts"], out["ICCACCTerrainSetting"]) == (2, 0, 1)
+    assert (out["ICCACCSpdLimOffs"], out["ICCACCSpdLimOffsTyp"]) == (7.5, 2)
+    assert (out["ICC_0x52AAliveCounter"], out["ICCACCTiGapCfm"], out["ICC_LKASetting"]) == (9, 1, 2)   # the rest is the ICC's

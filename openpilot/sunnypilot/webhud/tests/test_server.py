@@ -31,6 +31,7 @@ class TestServer(OpenpilotTestCase):
     self.tmp = tempfile.TemporaryDirectory()
     os.environ["LOG_ROOT"] = os.path.join(self.tmp.name, "realdata")
     self.saved = dict(values.ICC_0x35B_OVERRIDES)
+    self.saved_52a = dict(values.ICC_0x52A_OVERRIDES)
     self.params = _DevParams(os.path.join(self.tmp.name, "params.json"))
     self.engine = Engine(self.params)
     api = OverridesApi(self.params, self.engine.builder, self.engine.monitor)
@@ -47,6 +48,8 @@ class TestServer(OpenpilotTestCase):
     self.engine_thread.join(timeout=5)
     values.ICC_0x35B_OVERRIDES.clear()
     values.ICC_0x35B_OVERRIDES.update(self.saved)
+    values.ICC_0x52A_OVERRIDES.clear()
+    values.ICC_0x52A_OVERRIDES.update(self.saved_52a)
     self.tmp.cleanup()
     super().tearDown()
 
@@ -122,8 +125,14 @@ class TestServer(OpenpilotTestCase):
   def test_overrides_api(self):
     status, body, _ = self.request("GET", "/api/overrides")
     data = json.loads(body)
-    assert status == 200 and data["supported"] and [t["message"] for t in data["tables"]] == ["ICC_0x35B"]
-    table = data["tables"][0]
+    assert status == 200 and data["supported"] and [t["message"] for t in data["tables"]] == ["ICC_0x52A", "ICC_0x35B"]
+    acc = data["tables"][0]
+    assert acc["address"] == 0x52A and not acc["customized"]
+    accsigs = {s["name"]: s for s in acc["signals"]}
+    assert accsigs["ICCACCSwt"]["override"] == 1 and accsigs["ICCACCSpdLimOffs"]["override"] is None
+    assert accsigs["ICCACCSpdLimOffs"]["factor"] == 0.5 and accsigs["ICCACCSpdLimOffs"]["max"] == 31.5
+    assert all(accsigs[n]["locked"] for n in ("ICC_0x52ACheckSum", "ICC_0x52AAliveCounter", "ICCACCTiGapCfm", "ICC_0x52A_Rsv49"))
+    table = data["tables"][1]
     assert table["address"] == 0x35B and not table["customized"]
     sig = next(s for s in table["signals"] if s["name"] == "ICC_BSDSetting")
     assert sig["default"] == self.saved["ICC_BSDSetting"] and sig["values"]["2"] and not sig["locked"]
@@ -131,16 +140,26 @@ class TestServer(OpenpilotTestCase):
 
     status, body, _ = self.request("PUT", "/api/overrides", {"ICC_0x35B": {"ICC_BSDSetting": 9}})
     assert status == 400 and b"outside" in body
-    status, body, _ = self.request("PUT", "/api/overrides", {"ICC_0x52A": {"ICC_ACCSwt": 1}})
+    status, body, _ = self.request("PUT", "/api/overrides", {"ADAS_0x31C": {"ADAS_TiGapSet_ACC": 1}})
     assert status == 400 and b"not an overridable message" in body
+    status, body, _ = self.request("PUT", "/api/overrides", {"ICC_0x52A": {"ICCACCSpdLimOffs": 7.3}})
+    assert status == 400 and b"step 0.5" in body
     status, body, _ = self.request("PUT", "/api/overrides", {"ICC_0x35B": {"ICC_BSDSetting": 2}})
     assert status == 200 and self.params.get(PARAM) == {"ICC_0x35B": {"ICC_BSDSetting": 2}}
+    assert json.loads(body)["tables"][1]["customized"] and not json.loads(body)["tables"][0]["customized"]
+    # the HUD's Assist settings: the whole 0x52A table, merged with the stored 0x35B one
+    acc_table = {"ICCACCSwt": 1, "ICCACCFuncTyp": 2, "ICCACCSpdStepSize": 1, "ICCLaneTrajectorySetting": 1,
+                 "ICCACCTerrainSetting": 1, "ICCACCSpdLimOffsTyp": 2, "ICCACCSpdLimOffs": 7.5}
+    status, body, _ = self.request("PUT", "/api/overrides", {"ICC_0x52A": acc_table})
+    assert status == 200 and self.params.get(PARAM) == {"ICC_0x35B": {"ICC_BSDSetting": 2}, "ICC_0x52A": acc_table}
     assert json.loads(body)["tables"][0]["customized"]
 
     status, _, _ = self.request("PUT", "/api/overrides", {"ICC_0x35B": {}}, headers={"Origin": "http://evil.example"})
     assert status == 403
 
     status, body, _ = self.request("DELETE", "/api/overrides?message=ICC_0x35B")
+    assert status == 200 and self.params.get(PARAM) == {"ICC_0x52A": acc_table}   # resetting one table keeps the other
+    status, body, _ = self.request("DELETE", "/api/overrides?message=ICC_0x52A")
     assert status == 200 and self.params.get(PARAM) is None
 
   def test_params_allowlist(self):
@@ -149,13 +168,14 @@ class TestServer(OpenpilotTestCase):
     assert self.request("PUT", "/api/params", {"LongitudinalPersonality": 7})[0] == 400
     assert self.request("PUT", "/api/params", {"DisableUpdates": True})[0] == 400
 
-  def test_acc_terrain_param(self):
-    for enabled in (True, False):
-      status, body, _ = self.request("PUT", "/api/params", {"FiskerACCTerrain": enabled})
-      assert status == 200 and json.loads(body)["FiskerACCTerrain"] is enabled
-      assert self.params.get_bool("FiskerACCTerrain") is enabled
-      status, body, _ = self.request("GET", "/api/params")
-      assert status == 200 and json.loads(body)["FiskerACCTerrain"] is enabled
+  def test_acc_toggle_params(self):
+    for key in ("FiskerACCTerrain", "FiskerACCAutoSpeed"):
+      for enabled in (True, False):
+        status, body, _ = self.request("PUT", "/api/params", {key: enabled})
+        assert status == 200 and json.loads(body)[key] is enabled
+        assert self.params.get_bool(key) is enabled
+        status, body, _ = self.request("GET", "/api/params")
+        assert status == 200 and json.loads(body)[key] is enabled
 
   def test_ssh_keys(self):
     # the Oceanfront View app's key joins whatever keys are there, once, and SSH comes on; revoking takes only it
