@@ -5,15 +5,17 @@ Copyright (c) 2021-, Haibin Wen, sunnypilot, and a number of other contributors.
 This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 
-sunnypilot web HUD: a Tesla-style car view + settings page for an in-car browser.
+sunnypilot web HUD bridge: the comma's half of the Fisker Ocean HUD, Oceanfront View
+(https://github.com/moistpope/oceanfront-view).
 
   http://sunnypilot.local:8088   (also :80 when the process may bind it)
 
-The comma's half of the HUD, a bridge: it serves the single-page app, streams what it reads over a
-WebSocket at 20 Hz -- the ADASBUS and radar frames the page decodes and the openpilot services, in
-compact form -- replays recorded routes, and exposes the editable CAN overrides and params. The
-decoding and the world model run in the page (static/js/world/), so the car's own screen (the
-Android app in android/) carries the HUD on its own and this process stays light. Stdlib only
+A bridge: it streams what it reads over a WebSocket at 20 Hz -- the ADASBUS and radar frames the page
+decodes and the openpilot services, in compact form -- replays recorded routes, and exposes the
+editable CAN overrides and params. The decoding and the world model run in the page, which the
+Oceanfront View Android app carries onto the car's own screen (relaying /api and /ws here), so this
+process stays light. It serves no page of its own: "/" says where the page is, unless WEBHUD_PAGE_DIR
+names an Oceanfront View checkout, which it then serves for a plain browser on a PC. Stdlib only
 (http.server), like webrtcd: the AGNOS venv has no aiohttp.
 
 Dev on a PC:  python -m openpilot.sunnypilot.webhud.server --replay /path/to/rlog.zst
@@ -45,6 +47,16 @@ from openpilot.sunnypilot.webhud.websocket import WebSocket, accept_key
 from openpilot.sunnypilot.webhud.maptiles import MapFeatures, MapPrefetch, MapTiles, parse_features_path, parse_tile_path
 
 VERSION = "1.0"
+LANDING = f"""sunnypilot web HUD bridge {VERSION}
+
+This process streams the car's buses and openpilot's services to the HUD page. The page itself is the
+Oceanfront View app (https://github.com/moistpope/oceanfront-view): on the car's screen run that app; on a
+PC run `python3 serve.py --bridge <this host>` from its checkout and open http://localhost:18088, or set
+WEBHUD_PAGE_DIR to that checkout and this process serves the page too.
+
+Endpoints: /api/status, /api/routes, /api/replay, /api/upload, /api/params, /api/overrides, /map/...,
+/dbc/fisker_ocean_adas_world.dbc, /dbc/fisker_ocean_mrr.dbc, and the WebSocket at /ws.
+"""
 DEFAULT_PORT = int(os.getenv("WEBHUD_PORT", "8088"))
 DEFAULT_HOSTNAME = os.getenv("WEBHUD_HOSTNAME", "sunnypilot")
 RATE_HZ = 20
@@ -55,6 +67,7 @@ MAX_UPLOADS_KEPT = 5
 GZIP_TYPES = ("text/", "application/javascript", "application/json", "image/svg+xml", "model/gltf-binary")
 mimetypes.add_type("model/gltf-binary", ".glb")
 mimetypes.add_type("application/javascript", ".js")
+mimetypes.add_type("text/plain", ".dbc")   # text, so the DBCs gzip on their way to the page (the app serves them so too)
 
 # params the UI may read and write: key -> (type, validator)
 PARAM_ALLOWLIST: dict[str, tuple[type, Callable[[int], bool] | None]] = {
@@ -506,16 +519,27 @@ class HudHandler(BaseHTTPRequestHandler):
         return False
     return False
 
+  def _landing(self, rel: str) -> None:
+    # the page isn't here (it is the Oceanfront View app): "/" says so, anything else is a 404
+    if rel != "index.html":
+      return self._error(404, "not found")
+    self._send(200, LANDING.encode(), "text/plain; charset=utf-8", {"Cache-Control": "no-cache"})
+
   def _static(self, path: str) -> None:
     rel = unquote(path).lstrip("/") or "index.html"
-    prefix = next(p for p in STATIC_ROOTS if rel.startswith(p))
-    root = os.path.realpath(STATIC_ROOTS[prefix])
-    full = os.path.realpath(os.path.join(root, rel[len(prefix):]))
+    prefix = next((p for p in STATIC_ROOTS if rel.startswith(p)), None)
     if rel in STATIC_FILES:
       full = STATIC_FILES[rel]
-    elif not full.startswith(root + os.sep) or not os.path.isfile(full):
-      # unknown paths fall back to the app shell so deep links work
-      full, prefix = os.path.join(STATIC_DIR, "index.html"), ""
+    elif prefix is None:
+      return self._landing(rel)
+    else:
+      root = os.path.realpath(STATIC_ROOTS[prefix])
+      full = os.path.realpath(os.path.join(root, rel[len(prefix):]))
+      if not full.startswith(root + os.sep) or not os.path.isfile(full):
+        if STATIC_DIR is None:
+          return self._landing(rel)
+        # unknown paths fall back to the app shell so deep links work
+        full, prefix = os.path.join(STATIC_DIR, "index.html"), ""
     ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
     st = os.stat(full)
     mtime = st.st_mtime

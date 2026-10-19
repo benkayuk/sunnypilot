@@ -13,11 +13,14 @@ import socket
 import tempfile
 import threading
 import time
+from unittest import mock
 
 from opendbc.car.fisker import values
 
 from openpilot.common.test import OpenpilotTestCase
 from openpilot.sunnypilot.selfdrive.car.can_overrides import PARAM
+import openpilot.sunnypilot.webhud.server as webhud_server
+from openpilot.sunnypilot.webhud.paths import page_roots
 from openpilot.sunnypilot.webhud.server import Engine, OverridesApi, _DevParams, make_server
 from openpilot.sunnypilot.webhud.websocket import OP_TEXT, encode_frame, read_frame
 
@@ -59,43 +62,62 @@ class TestServer(OpenpilotTestCase):
     return res.status, raw, res
 
   def test_static_and_status(self):
-    status, body, _ = self.request("GET", "/")
-    assert status == 200 and b"sunnypilot HUD" in body
-    status, body, res = self.request("GET", "/js/main.js", headers={"Accept-Encoding": "gzip"})
-    assert status == 200 and res.getheader("Content-Encoding") == "gzip" and b"CarScene" in body
-    # third-party assets are served from openpilot/third_party/webhud
-    status, body, res = self.request("GET", "/vendor/OrbitControls.js")
-    assert status == 200 and b"OrbitControls" in body and "max-age" in res.getheader("Cache-Control")
-    status, body, res = self.request("GET", "/models/pulse_ocean_v0.10_parts.glb")
-    assert status == 200 and body[:4] == b"glTF" and res.getheader("Content-Type") == "model/gltf-binary"
-    for path in ("/../../server.py", "/vendor/../../../sunnypilot/webhud/server.py"):
-      status, body, _ = self.request("GET", path)
-      assert status == 200 and b"sunnypilot HUD" in body       # traversal falls back to the app shell
+    # the page isn't here (it's the Oceanfront View app): "/" says where it is, its files are 404s
+    status, body, res = self.request("GET", "/")
+    assert status == 200 and b"Oceanfront View" in body and res.getheader("Cache-Control") == "no-cache"
+    for path in ("/js/main.js", "/vendor/OrbitControls.js", "/models/pulse_ocean_v0.10_parts.glb", "/api/dbc",
+                 "/../../server.py", "/dbc/../server.py", "/dbc/../../../sunnypilot/webhud/server.py"):
+      assert self.request("GET", path)[0] == 404, path
     status, body, _ = self.request("GET", "/api/status")
     st = json.loads(body)
     assert status == 200 and st["hostname"] == "sunnypilot-test.local" and st["overrides"]
     # the page decodes the buses itself, with the DBCs served as files (the radar's lives in opendbc)
-    status, body, _ = self.request("GET", "/dbc/fisker_ocean_adas_world.dbc")
-    assert status == 200 and body.count(b"\nBO_ ") > 80
+    status, body, res = self.request("GET", "/dbc/fisker_ocean_adas_world.dbc")
+    assert status == 200 and body.count(b"\nBO_ ") > 80 and "max-age" in res.getheader("Cache-Control")
     status, body, _ = self.request("GET", "/dbc/fisker_ocean_mrr.dbc")
     assert status == 200 and b"MRR_" in body
-    assert self.request("GET", "/api/dbc")[0] == 200 and b"sunnypilot HUD" in self.request("GET", "/api/dbc")[1]   # gone: the app shell
 
   def test_static_validators(self):
-    # the car model and every other file can be checked with a 304 instead of sent again
-    status, body, res = self.request("GET", "/models/pulse_ocean_v0.10_parts.glb")
+    # every file can be checked with a 304 instead of sent again
+    path = "/dbc/fisker_ocean_adas_world.dbc"
+    status, body, res = self.request("GET", path)
     etag, modified = res.getheader("ETag"), res.getheader("Last-Modified")
-    assert status == 200 and etag and modified and len(body) > 1_000_000
-    status, body, res = self.request("GET", "/models/pulse_ocean_v0.10_parts.glb", headers={"If-None-Match": etag})
+    assert status == 200 and etag and modified and len(body) > 100_000
+    status, body, res = self.request("GET", path, headers={"If-None-Match": etag})
     assert status == 304 and body == b"" and res.getheader("ETag") == etag
-    assert self.request("GET", "/models/pulse_ocean_v0.10_parts.glb", headers={"If-Modified-Since": modified})[0] == 304
-    assert self.request("GET", "/models/pulse_ocean_v0.10_parts.glb", headers={"If-None-Match": '"0-0"'})[0] == 200
+    assert self.request("GET", path, headers={"If-Modified-Since": modified})[0] == 304
+    assert self.request("GET", path, headers={"If-None-Match": '"0-0"'})[0] == 200
     # gzip is its own entity; either tag matches the same file
-    status, _, res = self.request("GET", "/js/main.js", headers={"Accept-Encoding": "gzip"})
+    status, _, res = self.request("GET", path, headers={"Accept-Encoding": "gzip"})
     gz_tag = res.getheader("ETag")
     assert status == 200 and gz_tag.endswith('-gz"') and res.getheader("Vary") == "Accept-Encoding"
-    assert self.request("GET", "/js/main.js", headers={"If-None-Match": gz_tag})[0] == 304
-    assert self.request("GET", "/sw.js")[2].getheader("Cache-Control") == "no-cache"
+    assert self.request("GET", path, headers={"If-None-Match": gz_tag})[0] == 304
+
+  def test_page_dir(self):
+    # WEBHUD_PAGE_DIR names an Oceanfront View checkout: the page, three.js and the model are served from it
+    page = os.path.join(self.tmp.name, "oceanfront-view")
+    for rel, text in (("static/index.html", "<title>Oceanfront View</title><script src=/js/main.js></script>"),
+                      ("static/js/main.js", "class CarScene {}"), ("static/sw.js", "// worker"),
+                      ("third_party/three/OrbitControls.js", "class OrbitControls {}"), ("third_party/models/car.glb", "glTF"),
+                      ("dbc/fisker_ocean_adas_world.dbc", "BO_ 1 X: 8 ADAS")):
+      os.makedirs(os.path.dirname(os.path.join(page, rel)), exist_ok=True)
+      with open(os.path.join(page, rel), "w") as f:
+        f.write(text)
+    roots = page_roots(page)
+    with mock.patch.object(webhud_server, "STATIC_ROOTS", roots), mock.patch.object(webhud_server, "STATIC_DIR", roots[""]):
+      status, body, res = self.request("GET", "/")
+      assert status == 200 and b"Oceanfront View" in body and res.getheader("Cache-Control") == "no-cache"
+      status, body, res = self.request("GET", "/js/main.js", headers={"Accept-Encoding": "gzip"})
+      assert status == 200 and res.getheader("Content-Encoding") == "gzip" and b"CarScene" in body
+      status, body, res = self.request("GET", "/vendor/OrbitControls.js")
+      assert status == 200 and b"OrbitControls" in body and "max-age" in res.getheader("Cache-Control")
+      status, body, res = self.request("GET", "/models/car.glb")
+      assert status == 200 and body == b"glTF" and res.getheader("Content-Type") == "model/gltf-binary"
+      assert self.request("GET", "/sw.js")[2].getheader("Cache-Control") == "no-cache"
+      for path in ("/settings", "/../../server.py", "/vendor/../../../sunnypilot/webhud/server.py"):
+        status, body, _ = self.request("GET", path)
+        assert status == 200 and b"Oceanfront View" in body       # deep links and traversal fall back to the app shell
+      assert b"MRR_" in self.request("GET", "/dbc/fisker_ocean_mrr.dbc")[1]   # the radar DBC still comes from opendbc
 
   def test_overrides_api(self):
     status, body, _ = self.request("GET", "/api/overrides")
