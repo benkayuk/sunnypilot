@@ -186,6 +186,12 @@ procs += [
 
   # web HUD for an in-car browser (http://sunnypilot.local:8088)
   PythonProcess("webhud", "openpilot.sunnypilot.webhud.server", use_webhud),
+  # Fisker remote-control daemon — tiny HTTP server on 0.0.0.0:8899 for the
+  # phone webapp. Scoped to iscar so it only runs when a vehicle is engaged
+  # (same gating as controlsd); the carcontroller is the only consumer of its
+  # output. The server's own init resets state to safe defaults, and the
+  # Params keys are CLEAR_ON_MANAGER_START, so there's no persistence risk.
+  PythonProcess("remote_control_server", "openpilot.sunnypilot.selfdrive.remote_control.remote_control_server", iscar),
 ]
 
 if os.path.exists("../../sunnypilot/sunnylink/uploader.py"):
