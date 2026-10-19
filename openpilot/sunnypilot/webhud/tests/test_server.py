@@ -149,6 +149,14 @@ class TestServer(OpenpilotTestCase):
     assert self.request("PUT", "/api/params", {"LongitudinalPersonality": 7})[0] == 400
     assert self.request("PUT", "/api/params", {"DisableUpdates": True})[0] == 400
 
+  def test_acc_terrain_param(self):
+    for enabled in (True, False):
+      status, body, _ = self.request("PUT", "/api/params", {"FiskerACCTerrain": enabled})
+      assert status == 200 and json.loads(body)["FiskerACCTerrain"] is enabled
+      assert self.params.get_bool("FiskerACCTerrain") is enabled
+      status, body, _ = self.request("GET", "/api/params")
+      assert status == 200 and json.loads(body)["FiskerACCTerrain"] is enabled
+
   def test_ssh_keys(self):
     # the Oceanfront View app's key joins whatever keys are there, once, and SSH comes on; revoking takes only it
     blob = b"\x00\x00\x00\x13ecdsa-sha2-nistp256" + b"\x00\x00\x00\x08nistp256" + b"\x00\x00\x00\x41\x04" + bytes(64)
