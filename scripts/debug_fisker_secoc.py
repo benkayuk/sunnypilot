@@ -1,39 +1,29 @@
 #!/usr/bin/env python3
 """
-debug_fisker_secoc.py — SecOC MAC / freshness-counter forensics for the Ocean lateral abort.
+debug_fisker_secoc.py — SecOC counter forensics for the Ocean lateral abort (0x1D0).
 
-Runs ALONGSIDE sunnypilot (read-only: subscribes to cereal 'can' + 'sendcan', touches
-nothing in the control path). Run it together with debug_fisker_lateral.py — that one logs
-the signal transitions / CMP / TX cadence; THIS one answers the one question those can't:
+Runs ALONGSIDE sunnypilot (read-only). Earlier runs established:
+  * our SecOCKey + MAC algorithm + DataId reproduce OEM's own accepted 0x1D0 MACs
+    exactly (GW sync verifies, and many OEM frames verify) -> the crypto is correct;
+  * 0x1C0 is NOT SecOC (OEM sends ff placeholder) -> ignored here;
+  * the abort is a FULL-COUNTER problem: only 6 bits of msg_counter are on the wire,
+    the MAC covers the full 16 bits, and the high bits (per-window wrap count) + the
+    reset window must match what the EPS expects.
 
-    does our SecOC MAC match what the EPS actually accepts?
+So instead of reconstructing the counter (which drifts if you start mid-window), this
+tool DECODES the true (reset, full msg_counter) straight from each frame's MAC — it's
+ground truth. We pin the reset with the wire reset-flag (rflag = reset & 3) and search
+only the high-bit multiples (wire + 64*k), so it's fast.
 
-Ground truth
-------------
-A SecOC MAC is computed over the FULL freshness (Trip ‖ Reset ‖ full-16-bit MsgCounter) but
-only the low 6 bits of MsgCounter are on the wire — so a frame whose wire counter matches
-OEM can still fail the MAC if the HIGH bits differ. We can't see those high bits directly,
-so we recompute the MAC with our stored key + our per-window counter reconstruction and
-compare to the MAC actually on the wire:
+The money shot — SEED CHECK at engage:
+    When our TX of 0x1D0 starts (first frame after an idle gap), we decode OEM's last
+    bus-2 counter and our first transmitted counter. The EPS expects a continuous stream,
+    so our first TX should be OEM_last + 1. Any other offset is the seed bug, printed as
+    e.g. "SEED CHECK: OEM_last=163 our_first=99 diff=-64  <-- OFF, EPS will reject".
+Plus a steady continuity check and an abort ring dump, both in true decoded counters.
 
-  * OEM bus-2 frames: OEM's own ADAS_0x1D0/0x1C0. When OEM is actively steering these carry
-    a real MAC the EPS accepts — ground truth. When idle OEM sends an UNSIGNED placeholder
-    (MAC = ff ff ff); we skip + count those (and report the count, so we learn whether OEM
-    signs while idle).
-  * our frames (sendcan): always carry a real MAC we computed. Self-consistency check, and
-    captured in the ring buffer so the abort dump shows exactly what we were sending.
-
-On any REAL mismatch (signed frame, after a verified GW sync) we brute-force only the
-high-bit multiples (wire + 64*k) — the low 6 bits already match — so it's fast and can't
-freeze the loop. The matching msg_counter reveals the value the EPS expects → the fix.
-
-Nothing is verified until we've seen a GW_Syn_All (0x20) whose MAC verifies with our key:
-before that we don't know trip/reset and any comparison is meaningless.
-
-Usage (on the comma 3X):
-    cd /data/openpilot && PYTHONPATH=. python3 scripts/debug_fisker_secoc.py
-
-Writes /data/fisker_secoc_debug.log (append) AND stdout. Ctrl-C to stop.
+Usage:  cd /data/openpilot && PYTHONPATH=. python3 scripts/debug_fisker_secoc.py
+Writes /data/fisker_secoc_debug.log + stdout. Ctrl-C to stop.
 """
 
 from __future__ import annotations
@@ -49,165 +39,104 @@ from opendbc.car.fisker.secoc import secoc_mac, sync_mac
 
 ADAS_DBC = "fisker_ocean_adas"
 ADDR_1D0 = 0x1D0
-ADDR_1C0 = 0x1C0
-OEM_BUS = 2        # OEM ADAS's own frames (ground truth, when signed)
-OUR_BUS = 0        # ADASBUS — where our injected frames go out
-PLACEHOLDER_MAC = b"\xff\xff\xff"
-
-MAX_K = 1024       # high-bit search depth (wire + 64*k); windows are ~100 frames so this is plenty
-MAX_BRUTES = 6     # cap brute-forces so a persistent mismatch can't spam
+OEM_BUS = 2
+OUR_BUS = 0
+MAX_K = 64                 # full counter per ~1 s window is <~130, so k<=2; 64 is plenty
+ENGAGE_GAP_NS = 50_000_000  # >50 ms with no TX = an engage edge
 
 
 def fmt_ts() -> str:
   return datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
 
-def hexb(b: bytes | None) -> str:
+def hexb(b):
   return b.hex() if b else "--"
 
 
-class FullCtr:
-  """Reconstruct the full per-window SecOC msg_counter from the 6-bit on-wire value,
-  mirroring carstate: the high bits are a PER-GW-RESET-WINDOW count — zero them at each
-  reset, +1 on every 63->0 wrap within the window."""
-  def __init__(self):
-    self.reset_tracked = None
-    self.wire_last = None
-    self.wraps = 0
-
-  def update(self, wire: int, reset: int) -> int:
-    if reset != self.reset_tracked:
-      self.reset_tracked = reset
-      self.wraps = 0
-    elif self.wire_last is not None and wire < self.wire_last:
-      self.wraps += 1
-    self.wire_last = wire
-    return self.wraps * 64 + wire
-
-
-def search_highbits(key, can_id, pdu, mac_wire, trip, reset, wire):
-  """The low 6 bits (wire) already match, so only the high bits can be wrong: search
-  msg_counter = wire + 64*k. Then try neighbour reset windows. Fast (<~0.5 s)."""
-  for k in range(MAX_K):
-    m = wire + 64 * k
-    if secoc_mac(key, can_id, pdu, trip, reset, m) == mac_wire:
-      return {"kind": "msg_counter", "msg": m, "trip": trip, "reset": reset}
-  for dr in (1, -1, 2, -2, 3, -3):
-    r = reset + dr
+def decode_true(key, pdu, mac_wire, wire, rflag, trip, gw_reset):
+  """Decode the true (reset, full msg_counter) from a 0x1D0 frame's MAC. The wire rflag
+  pins reset mod 4; try the few reset windows around the GW value, then the high-bit
+  multiples of the counter (low 6 bits already == wire). Returns (reset, full) or None."""
+  for r in (gw_reset, gw_reset - 1, gw_reset + 1, gw_reset - 2, gw_reset + 2):
+    if r < 0 or (r & 3) != rflag:
+      continue
     for k in range(MAX_K):
       m = wire + 64 * k
-      if secoc_mac(key, can_id, pdu, trip, r, m) == mac_wire:
-        return {"kind": "reset_off", "msg": m, "trip": trip, "reset": r, "reset_delta": dr}
+      if secoc_mac(key, ADDR_1D0, pdu, trip, r, m) == mac_wire:
+        return r, m
   return None
 
 
-def main():
-  log_path = Path("/data/fisker_secoc_debug.log")
-  log_f = open(log_path, "a", buffering=1)
+def parts(data):
+  """(wire, rflag, pdu, mac) from a raw 0x1D0 frame."""
+  return (data[4] >> 2) & 0x3F, data[4] & 0x3, bytes(data[0:4]), bytes(data[5:8])
 
-  def say(s: str, *, loud: bool = False) -> None:
+
+def main():
+  log_f = open(Path("/data/fisker_secoc_debug.log"), "a", buffering=1)
+
+  def say(s, *, loud=False):
     line = f"[{fmt_ts()}] {'***' if loud else '   '} {s}"
     print(line, flush=True)
     log_f.write(line + "\n")
 
-  say("=== fisker SecOC forensics ===", loud=True)
+  say("=== fisker SecOC counter forensics (0x1D0) ===", loud=True)
 
-  # ---- key: hex string in params 'SecOCKey', same as card.py ----
   key = None
   try:
     from openpilot.common.params import Params
     raw = Params().get("SecOCKey")
     if raw is not None:
-      txt = raw.decode() if isinstance(raw, (bytes, bytearray)) else raw
-      key = bytes.fromhex(txt.strip())
+      key = bytes.fromhex((raw.decode() if isinstance(raw, (bytes, bytearray)) else raw).strip())
   except Exception as e:  # noqa: BLE001
     say(f"ERROR reading SecOCKey: {e}", loud=True)
   if not key or len(key) != 16:
-    say(f"ERROR: need a 16-byte SecOCKey in params (got {len(key) if key else 0}). Cannot verify MACs.", loud=True)
+    say("ERROR: need a 16-byte SecOCKey in params. Cannot verify MACs.", loud=True)
     return
-  say(f"SecOCKey loaded ({len(key)} bytes). Waiting for a GW sync (0x20) to verify the key...")
+  say(f"SecOCKey loaded ({len(key)} bytes). Waiting for GW sync (0x20)...")
 
   can_sock = messaging.sub_sock("can", conflate=False, timeout=50)
   sendcan_sock = messaging.sub_sock("sendcan", conflate=False, timeout=50)
-  # GW sync (trip/reset/mac) and EPS reply via the DBC — correct byte layout, no guessing.
   cp_gw = CANParser(ADAS_DBC, [("GW_Syn_All", 0)], 0)
   cp_eps = CANParser(ADAS_DBC, [("EPS_0x1C2", 0)], 0)
 
   trip = reset = 0
-  sync_ok = False          # key verified against the latest GW sync
-  have_sync = False        # have we EVER verified a sync (gate for frame checks)
+  have_sync = sync_ok = False
+  sync_fail_warned = False
 
-  trackers = {("oem", ADDR_1D0): FullCtr(), ("oem", ADDR_1C0): FullCtr(),
-              ("our", ADDR_1D0): FullCtr(), ("our", ADDR_1C0): FullCtr()}
-  # [ok, bad, placeholder]
-  stats = {k: [0, 0, 0] for k in trackers}
-  brutes_done = 0
-  first_mismatch = set()
-
-  ring = deque(maxlen=120)
+  # steady-state continuity: last decoded true counter per source
+  last_true = {"oem": None, "our": None}
+  cont = {"oem": [0, 0], "our": [0, 0]}  # [+1 steps, non-+1 steps] within a window
+  last_oem_frame = None                  # (wire, rflag, pdu, mac) of most recent OEM bus-2 0x1D0
+  last_our_tx_ns = 0
+  ring = deque(maxlen=120)               # (ns, tag, wire, rflag, pdu, mac)
   last_sts = None
   last_abort = 0
   last_summary = time.monotonic()
-  sync_fail_warned = False
+  dropped = {"oem": 0, "our": 0}         # couldn't decode (no MAC match) — alarming if >0 for oem
 
-  def verify_frame(tag, addr, data, log_mono):
-    nonlocal brutes_done
-    if len(data) < 8:
-      return
-    wire = (data[4] >> 2) & 0x3F
-    rflag = data[4] & 0x3
-    pdu = bytes(data[0:4])
-    mac_wire = bytes(data[5:8])
-    full = trackers[(tag, addr)].update(wire, reset)
-
-    if mac_wire == PLACEHOLDER_MAC:
-      stats[(tag, addr)][2] += 1            # unsigned placeholder (idle) — nothing to check
-      ring.append((log_mono, tag, addr, wire, rflag, full, mac_wire, None, None))
-      return
-
-    mac_calc = secoc_mac(key, addr, pdu, trip, reset, full)
-    match = (mac_calc == mac_wire)
-    stats[(tag, addr)][0 if match else 1] += 1
-    ring.append((log_mono, tag, addr, wire, rflag, full, mac_wire, mac_calc, match))
-
-    if not match:
-      kn = f"{tag}_{addr:03x}"
-      if kn not in first_mismatch:
-        first_mismatch.add(kn)
-        rflag_ok = (rflag == (reset & 0x3))
-        say(f"MISMATCH {tag} 0x{addr:03X}: wire_mac={hexb(mac_wire)} calc_mac={hexb(mac_calc)} "
-            f"wire_ctr={wire} full_ctr={full} rflag={rflag}(reset&3={reset & 0x3},ok={rflag_ok}) "
-            f"trip={trip} reset={reset} pdu={hexb(pdu)}", loud=True)
-        if brutes_done < MAX_BRUTES:
-          brutes_done += 1
-          t0 = time.monotonic()
-          found = search_highbits(key, addr, pdu, mac_wire, trip, reset, wire)
-          dt = time.monotonic() - t0
-          if found is None:
-            say(f"  no high-bit match in {dt:.2f}s — key/DataId/algorithm differ for 0x{addr:03X}, "
-                f"or trip/reset wrong", loud=True)
-          else:
-            off = found["msg"] - full
-            extra = f" reset_delta={found.get('reset_delta')}" if found["kind"] == "reset_off" else ""
-            say(f"  FOUND in {dt:.2f}s: {found['kind']} msg_counter={found['msg']} "
-                f"(we use {full}, offset {off:+d}){extra}", loud=True)
-            say(f"  => EPS expects full msg_counter {found['msg']}; we reconstruct {full}. "
-                f"FIX: add {off:+d} to our seed.", loud=True)
-
-  def dump_ring(reason):
-    say(f"---- RING DUMP ({reason}): last {len(ring)} lateral frames ----", loud=True)
-    now_ns = time.monotonic_ns()
-    for (lm, tag, addr, wire, rflag, full, mw, mc, match) in ring:
-      age = (now_ns - lm) / 1e6
-      flag = "PLACEHOLDER(ff)" if mc is None else ("OK " if match else "BAD")
-      say(f"    -{age:7.1f}ms {tag:3s} 0x{addr:03X} wire={wire:2d} full={full:5d} rflag={rflag} "
-          f"mac_wire={hexb(mw)} mac_calc={hexb(mc)} [{flag}]")
-    say("---- end ring dump ----", loud=True)
+  def decode(tag, data):
+    wire, rflag, pdu, mac = parts(data)
+    dec = decode_true(key, pdu, mac, wire, rflag, trip, reset)
+    if dec is None:
+      dropped[tag] += 1
+      return None
+    r, full = dec
+    # continuity (within a window): did it advance by exactly 1?
+    prev = last_true[tag]
+    if prev is not None:
+      step = full - prev
+      if step == 1:
+        cont[tag][0] += 1
+      elif step != 0:
+        cont[tag][1] += 1
+    last_true[tag] = full
+    return r, full, wire
 
   try:
     while True:
       can_batch = []
-      raw = []  # (log_mono, direction, addr, data, src)
+      raw = []
       for evt in messaging.drain_sock(can_sock, wait_for_one=False):
         can_batch.append((evt.logMonoTime, [(c.address, c.dat, c.src) for c in evt.can]))
         for c in evt.can:
@@ -216,7 +145,6 @@ def main():
         for c in evt.sendcan:
           raw.append((evt.logMonoTime, "tx", c.address, bytes(c.dat), c.src))
 
-      # update GW sync (trip/reset) + EPS state from this batch
       if can_batch:
         cp_gw.update(can_batch)
         cp_eps.update(can_batch)
@@ -225,53 +153,78 @@ def main():
         reset = ((int(gw["Syn_RstCntrVal_Byte0_All"]) << 16) | (int(gw["Syn_RstCntrVal_Byte1_All"]) << 8)
                  | int(gw["Syn_RstCntrVal_Byte2_All"]))
         mac = bytes([int(gw["Syn_MACInfo_Byte0_All"]), int(gw["Syn_MACInfo_Byte1_All"]), int(gw["Syn_MACInfo_Byte2_All"])])
-        new_sync_ok = (sync_mac(key, trip, reset) == mac)
-        if new_sync_ok and not have_sync:
-          say(f"GW sync VERIFIED: key OK, trip={trip} reset={reset}. Now checking lateral MACs.", loud=True)
-        if (not new_sync_ok) and (trip or reset) and not sync_fail_warned:
-          say(f"GW sync key verify FAIL (trip={trip} reset={reset} wire_mac={hexb(mac)}). "
-              f"Key or sync layout wrong — lateral MAC checks would be meaningless.", loud=True)
+        now_ok = (sync_mac(key, trip, reset) == mac)
+        if now_ok and not have_sync:
+          say(f"GW sync VERIFIED: key OK, trip={trip} reset={reset}. Decoding 0x1D0 counters.", loud=True)
+        if (not now_ok) and (trip or reset) and not sync_fail_warned:
+          say(f"GW sync key verify FAIL (trip={trip} reset={reset}). Key/layout wrong.", loud=True)
           sync_fail_warned = True
-        sync_ok = new_sync_ok
-        have_sync = have_sync or new_sync_ok
+        sync_ok = now_ok
+        have_sync = have_sync or now_ok
 
-      # verify lateral frames only once we trust trip/reset
       if have_sync and sync_ok:
         raw.sort(key=lambda e: e[0])
-        for (log_mono, direction, addr, data, src) in raw:
-          if addr in (ADDR_1D0, ADDR_1C0):
-            if direction == "rx" and src == OEM_BUS:
-              verify_frame("oem", addr, data, log_mono)
-            elif direction == "tx" and src == OUR_BUS:
-              verify_frame("our", addr, data, log_mono)
+        for (ns, direction, addr, data, src) in raw:
+          if addr != ADDR_1D0 or len(data) < 8:
+            continue
+          if direction == "rx" and src == OEM_BUS:
+            last_oem_frame = parts(data)
+            d = decode("oem", data)
+            ring.append((ns, "oem", data[4], d))
+          elif direction == "tx" and src == OUR_BUS:
+            # engage edge: first TX after an idle gap -> SEED CHECK vs OEM's last frame
+            if ns - last_our_tx_ns > ENGAGE_GAP_NS:
+              oem_dec = None
+              if last_oem_frame is not None:
+                ow, orf, opdu, om = last_oem_frame
+                oem_dec = decode_true(key, opdu, om, ow, orf, trip, reset)
+              uw, urf, updu, um = parts(data)
+              our_dec = decode_true(key, updu, um, uw, urf, trip, reset)
+              if oem_dec and our_dec:
+                diff = our_dec[1] - (oem_dec[1] + 1)
+                verdict = "continuous (OK)" if diff == 0 else f"OFF by {diff:+d}  <-- EPS will reject"
+                say(f"SEED CHECK @engage: OEM_last_full={oem_dec[1]} our_first_full={our_dec[1]} "
+                    f"(expect OEM_last+1={oem_dec[1] + 1}) -> {verdict}", loud=True)
+              else:
+                say(f"SEED CHECK @engage: could not decode (oem={oem_dec} our={our_dec})", loud=True)
+              last_true["our"] = None  # restart our continuity for this engagement
+            last_our_tx_ns = ns
+            d = decode("our", data)
+            ring.append((ns, "our", data[4], d))
 
-      # EPS reject -> dump ring
       if can_batch:
         sts = int(cp_eps.vl["EPS_0x1C2"]["EPS_AdasLatCtrlSts"])
         abort = int(cp_eps.vl["EPS_0x1C2"]["EPS_AbortFb"])
         if (abort not in (0, 1) and last_abort in (0, 1)) or (sts == 3 and last_sts != 3):
-          say(f"EPS REJECT: AdasLatCtrlSts {last_sts}->{sts}  AbortFb {last_abort}->{abort}", loud=True)
-          dump_ring(f"abort={abort} sts={sts}")
+          say(f"EPS REJECT: sts {last_sts}->{sts}  abort {last_abort}->{abort}", loud=True)
+          say(f"---- RING DUMP: last {len(ring)} 0x1D0 frames (decoded true full counter) ----", loud=True)
+          now_ns = time.monotonic_ns()
+          for (ns, tag, b4, dec) in ring:
+            age = (now_ns - ns) / 1e6
+            if dec is None:
+              say(f"    -{age:7.1f}ms {tag:3s} wire={(b4 >> 2) & 0x3F:2d} rflag={b4 & 3} full=UNDECODABLE")
+            else:
+              say(f"    -{age:7.1f}ms {tag:3s} wire={(b4 >> 2) & 0x3F:2d} rflag={b4 & 3} reset={dec[0]} full={dec[1]}")
+          say("---- end ring dump ----", loud=True)
         elif sts != last_sts or abort != last_abort:
-          say(f"EPS: AdasLatCtrlSts {last_sts}->{sts}  AbortFb {last_abort}->{abort}")
+          say(f"EPS: sts {last_sts}->{sts}  abort {last_abort}->{abort}")
         last_sts, last_abort = sts, abort
 
       now = time.monotonic()
       if now - last_summary > 2.0:
         last_summary = now
-        parts = []
-        for (tag, addr), (ok, bad, ph) in stats.items():
-          if ok or bad or ph:
-            parts.append(f"{tag}0x{addr:03X}:{ok}ok/{bad}bad/{ph}ff")
-        say(f"summary sync={'OK' if sync_ok else ('waiting' if not have_sync else 'FAIL-now')} "
-            f"trip={trip} reset={reset} | {'  '.join(parts) if parts else 'no lateral frames yet'}")
+        say(f"summary sync={'OK' if sync_ok else ('waiting' if not have_sync else 'FAIL')} "
+            f"trip={trip} reset={reset} | oem +1:{cont['oem'][0]}/jump:{cont['oem'][1]}/undec:{dropped['oem']} "
+            f"last={last_true['oem']} || our +1:{cont['our'][0]}/jump:{cont['our'][1]}/undec:{dropped['our']} "
+            f"last={last_true['our']}")
 
       time.sleep(0.003)
 
   except KeyboardInterrupt:
     say("=== stopped by user ===", loud=True)
   finally:
-    say("final: " + "  ".join(f"{t}0x{a:03X}:{ok}ok/{bad}bad/{ph}ff" for (t, a), (ok, bad, ph) in stats.items()))
+    say(f"final: oem +1:{cont['oem'][0]}/jump:{cont['oem'][1]}/undec:{dropped['oem']}  "
+        f"our +1:{cont['our'][0]}/jump:{cont['our'][1]}/undec:{dropped['our']}")
     log_f.close()
 
 
