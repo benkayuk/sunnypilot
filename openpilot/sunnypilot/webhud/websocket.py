@@ -5,7 +5,7 @@ This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 
 Minimal server-side WebSocket (RFC 6455) on top of http.server -- the AGNOS venv has no aiohttp or
-websockets package, and the HUD only needs text frames, ping/pong and close.
+websockets package, and the HUD only needs text frames (binary ones for the camera video), ping/pong and close.
 """
 import base64
 import hashlib
@@ -86,6 +86,9 @@ class WebSocket:
 
   def send_text(self, text: str) -> None:
     self._send(encode_frame(text.encode(), OP_TEXT))
+
+  def send_binary(self, data: bytes) -> None:
+    self._send(encode_frame(data, OP_BINARY))
 
   def _send(self, frame: bytes) -> None:
     if self.closed:

@@ -47,6 +47,7 @@ from openpilot.sunnypilot.webhud.mdns import MdnsPublisher, ipv4_interfaces
 from openpilot.sunnypilot.webhud.paths import STATIC_DIR, STATIC_FILES, STATIC_ROOTS
 from openpilot.sunnypilot.webhud.sources import LiveSource, ReplaySource, list_routes
 from openpilot.sunnypilot.webhud.state import StreamBuilder, merge_ticks
+from openpilot.sunnypilot.webhud.video import VideoHub, VideoViewer
 from openpilot.sunnypilot.webhud.websocket import WebSocket, accept_key
 from openpilot.sunnypilot.webhud.maptiles import MapFeatures, MapPrefetch, MapTiles, parse_features_path, parse_tile_path
 
@@ -59,7 +60,7 @@ PC run `python3 serve.py --bridge <this host>` from its checkout and open http:/
 WEBHUD_PAGE_DIR to that checkout and this process serves the page too.
 
 Endpoints: /api/status, /api/routes, /api/replay, /api/upload, /api/params, /api/overrides, /api/ssh, /map/...,
-/dbc/fisker_ocean_adas_world.dbc, /dbc/fisker_ocean_mrr.dbc, and the WebSocket at /ws.
+/dbc/fisker_ocean_adas_world.dbc, /dbc/fisker_ocean_mrr.dbc, the WebSocket at /ws and the camera view's at /video.
 """
 DEFAULT_PORT = int(os.getenv("WEBHUD_PORT", "8088"))
 DEFAULT_HOSTNAME = os.getenv("WEBHUD_HOSTNAME", "sunnypilot")
@@ -371,6 +372,7 @@ class HudServer(ThreadingHTTPServer):
   engine: Engine
   params: object
   overrides_api: "OverridesApi"
+  video: VideoHub
   hostname: str
   port: int
   mdns: MdnsPublisher | None
@@ -454,6 +456,8 @@ class HudHandler(BaseHTTPRequestHandler):
         return
       if path == "/ws" and method == "GET":
         return self._websocket()
+      if path == "/video" and method == "GET":
+        return self._video(query)
       if path.startswith("/map/tile/") and method == "GET":
         return self._map_tile(path)
       if path.startswith("/map/features/") and method == "GET":
@@ -582,19 +586,9 @@ class HudHandler(BaseHTTPRequestHandler):
 
   # websocket --------------------------------------------------------------------
   def _websocket(self) -> None:
-    key = self.headers.get("Sec-WebSocket-Key")
-    if self.headers.get("Upgrade", "").lower() != "websocket" or not key:
-      return self._error(400, "expected a websocket upgrade")
-    self.send_response(HTTPStatus.SWITCHING_PROTOCOLS)
-    self.send_header("Upgrade", "websocket")
-    self.send_header("Connection", "Upgrade")
-    self.send_header("Sec-WebSocket-Accept", accept_key(key))
-    self.end_headers()
-    self.wfile.flush()
-    self.close_connection = True
-
-    self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    ws = WebSocket(self.connection, self.rfile)
+    ws = self._upgrade()
+    if ws is None:
+      return
     client = Client(ws, self.client_address[0])
     engine = self.server.engine
     engine.add_client(client)
@@ -609,6 +603,46 @@ class HudHandler(BaseHTTPRequestHandler):
     finally:
       engine.remove_client(client)
       client.close()
+
+  def _upgrade(self) -> WebSocket | None:
+    key = self.headers.get("Sec-WebSocket-Key")
+    if self.headers.get("Upgrade", "").lower() != "websocket" or not key:
+      self._error(400, "expected a websocket upgrade")
+      return None
+    self.send_response(HTTPStatus.SWITCHING_PROTOCOLS)
+    self.send_header("Upgrade", "websocket")
+    self.send_header("Connection", "Upgrade")
+    self.send_header("Sec-WebSocket-Accept", accept_key(key))
+    self.end_headers()
+    self.wfile.flush()
+    self.close_connection = True
+    self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    return WebSocket(self.connection, self.rfile)
+
+  # the camera view (video.py): H.264 frames and the overlay; the encoder runs while anyone watches
+  def _video(self, query) -> None:
+    ws = self._upgrade()
+    if ws is None:
+      return
+    viewer = VideoViewer(ws, (query.get("camera") or ["road"])[0])
+    hub = self.server.video
+    hub.add(viewer)
+    try:
+      while True:
+        msg = ws.recv()
+        if msg is None:
+          break
+        try:
+          data = json.loads(msg)
+        except ValueError:
+          continue
+        if data.get("type") == "camera":
+          viewer.set_camera(str(data.get("camera")))
+        elif data.get("type") == "ping":
+          viewer.push_text(json.dumps({"type": "pong", "t": data.get("t")}))
+    finally:
+      hub.remove(viewer)
+      viewer.close()
 
   def _ws_message(self, client: Client, msg: str) -> None:
     try:
@@ -638,6 +672,7 @@ def status_payload(server: HudServer) -> dict:
     "onroad": engine.monitor.onroad,
     "moving": engine.monitor.moving,
     "overrides": server.overrides_api.supported,
+    "video": True,   # /video, the camera view
   }
 
 
@@ -941,8 +976,10 @@ ROUTES = {
 
 # ---- entry point -------------------------------------------------------------------------------
 
-def make_server(host: str, port: int, engine: Engine, params, overrides_api: OverridesApi, hostname: str) -> HudServer:
+def make_server(host: str, port: int, engine: Engine, params, overrides_api: OverridesApi, hostname: str,
+                video: VideoHub | None = None) -> HudServer:
   server = HudServer((host, port), HudHandler)
+  server.video = video if video is not None else VideoHub(params)
   server.engine = engine
   server.params = params
   server.overrides_api = overrides_api
@@ -976,10 +1013,11 @@ def main(argv: list[str] | None = None) -> None:
   engine = Engine(params, args.replay, args.demo)
   overrides_api = OverridesApi(params, engine.builder, engine.monitor)
 
-  servers = [make_server(args.host, args.port, engine, params, overrides_api, args.hostname)]
+  video = VideoHub(params)
+  servers = [make_server(args.host, args.port, engine, params, overrides_api, args.hostname, video)]
   if not args.no_port80 and args.port != 80:
     try:
-      servers.append(make_server(args.host, 80, engine, params, overrides_api, args.hostname))
+      servers.append(make_server(args.host, 80, engine, params, overrides_api, args.hostname, video))
     except OSError:
       pass  # needs root or cap_net_bind_service; the main port is enough
 
