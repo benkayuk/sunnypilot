@@ -22,6 +22,9 @@ Server -> page:
                                          car frame (x forward, y right, z down) to stream pixels
           {type: model, frameId, frameIdExtra, path, lanes, laneProbs, edges, edgeStds, accel, leads,
            pathZ, engaged, experimental, allowThrottle, longControl}               points are [x, y, z]
+          {type: hud, ...}  what the comma 4's onroad screen shows besides the model (hud_state): the status that
+                                         colours it, set speed, steering wheel, torque bar, alert, driver
+                                         monitoring, blind spots and the confidence ball, about 20 times a second
           {type: error, message}
 Page -> server:
   {type: camera, camera: road|wide}, {type: ping, t}
@@ -48,6 +51,12 @@ CAMERA_SOURCES = {
 }
 OVERLAY_SERVICES = ["modelV2", "radarState", "extrinsicsCalibration", "selfdriveState", "longitudinalPlan",
                     "carParams", "deviceState", "narrowRoadCameraState", "wideRoadCameraState"]
+HUD_SERVICES = ["carState", "controlsState", "carControl", "carOutput", "vehicleParameters", "selfdriveStateSP",
+                "onroadEvents", "driverMonitoringState"]
+HUD_PERIOD_S = 0.05     # the HUD's state goes out this often (the screen's filters smooth it to 60 Hz)
+HUD_PARAMS = ("IsMetric", "AlwaysOnDM", "BlindSpot")
+DEFAULT_MAX_LAT_ACCEL = 3.0  # m/s^2, selfdrive/ui/mici/onroad/torque_bar.py
+GRAVITY = 9.81
 LINGER_S = 10.0         # keep the encoder up this long after the last viewer leaves (a camera switch, a reconnect)
 PARAM_REFRESH_S = 2.0   # re-assert the param (the manager clears it when it restarts)
 MAX_QUEUED_FRAMES = 6   # a viewer this far behind skips to the next keyframe (at most 5 frames away)
@@ -85,9 +94,12 @@ def camera_transforms(device_type: str, sensor: str, sizes: dict[str, tuple[int,
     if not cc.width or not width:
       continue
     k = np.diag([width / cc.width, height / cc.height, 1.0]) @ cc.intrinsics
-    entry = {"width": width, "height": height, "K": _round(k)}
+    entry = {"width": width, "height": height, "K": _round(k),
+             # the sensor's own frame, which the comma's screen frames (the stream is that, resized)
+             "fullWidth": cc.width, "fullHeight": cc.height, "Kfull": _round(cc.intrinsics)}
     if calibrated:
       entry["M"] = _round(k @ view_from_calib[cam], 6)
+      entry["Mfull"] = _round(cc.intrinsics @ view_from_calib[cam], 6)
     cameras[cam] = entry
   return {"type": "calib", "calibrated": calibrated, "cameras": cameras}
 
@@ -101,9 +113,9 @@ def model_overlay(model, radar, selfdrive, plan, long_control: bool, path_z: flo
   """What the model renderer draws, in the car frame (x forward, y right, z down)."""
   leads = []
   if radar is not None:
-    for lead in (radar.leadOne, radar.leadTwo):
+    for i, lead in enumerate((radar.leadOne, radar.leadTwo)):
       if lead.present:
-        leads.append({"d": round(lead.dRel, 2), "y": round(-lead.yRel + camera_offset, 2), "v": round(lead.vRel, 2)})
+        leads.append({"d": round(lead.dRel, 2), "y": round(-lead.yRel + camera_offset, 2), "v": round(lead.vRel, 2), "i": i})
   return {
     "type": "model",
     "frameId": model.frameId,
@@ -120,6 +132,99 @@ def model_overlay(model, radar, selfdrive, plan, long_control: bool, path_z: flo
     "experimental": bool(selfdrive.experimentalMode) if selfdrive is not None else False,
     "allowThrottle": bool(plan.allowThrottle) if plan is not None else True,
     "longControl": long_control,
+  }
+
+
+def ui_status(ss, ss_sp, events) -> str:
+  """selfdrive/ui's status (the colour of the lane lines, the torque bar, the confidence ball): the same as
+  UIStateSP.update_status, with MADS."""
+  state = str(ss.state)
+  mads = getattr(ss_sp, "mads", None) if ss_sp is not None else None
+  if state == "preEnabled":
+    return "override"
+  if state == "overriding":
+    if mads is None or not mads.available:
+      return "override"
+    if any(getattr(e, "overrideLongitudinal", False) for e in events):
+      return "override"
+  if mads is not None and str(mads.state) in ("paused", "overriding"):
+    return "override"
+  if mads is None or not mads.available:
+    return "engaged" if ss.enabled else "disengaged"
+  if not mads.enabled and not ss.enabled:
+    return "disengaged"
+  if mads.enabled and ss.enabled:
+    return "engaged"
+  if mads.enabled:
+    return "lat_only"
+  if ss.enabled:
+    return "long_only"
+  return "disengaged"
+
+
+def torque_target(cs, car_state, vp, car_control, car_output, max_lat_accel: float) -> float:
+  """The torque bar's target, -1..1, before the screen's filter (selfdrive/ui/mici/onroad/torque_bar.py)."""
+  if cs.lateralControlState.which() in ("angleState", "curvatureState"):
+    v2 = car_state.vEgo ** 2
+    actual = cs.curvature * v2
+    desired = cs.desiredCurvature * v2
+    # road roll counts too, less near standstill where it's less accurate
+    roll = vp.roll * GRAVITY * min(1.0, max(0.0, (car_state.vEgo - 5) / 10))
+    if not car_control.latActive:
+      return 0.0
+    return max(-1.0, min(1.0, ((actual - roll) + (desired - actual)) / (max_lat_accel or DEFAULT_MAX_LAT_ACCEL)))
+  return -float(car_output.actuatorsOutput.torque)
+
+
+HUD_EVENTS = ("preLaneChangeLeft", "preLaneChangeRight", "laneChange")
+
+
+def hud_state(sm, started: bool, status: str, params: dict, max_lat_accel: float) -> dict:
+  """What the comma 4's onroad screen draws besides the model (selfdrive/ui/mici/onroad): raw values, the
+  page filters and lays them out the way the screen does."""
+  cs, car_state, ss = sm["controlsState"], sm["carState"], sm["selfdriveState"]
+  set_speed = car_state.vCruiseCluster or cs.deprecated.vCruise          # km/h, 255 when unset
+  dm = sm["driverMonitoringState"]
+  vps = dm.visionPolicyState
+  model = sm["modelV2"]
+  preds = model.meta.disengagePredictions
+  events = [str(e.name) for e in sm["onroadEvents"]]
+  alert = None
+  if ss.alertSize.raw != 0:
+    alert = {"text1": ss.alertText1, "text2": ss.alertText2, "size": ss.alertSize.raw, "status": ss.alertStatus.raw,
+             "visual": str(ss.alertHudVisual), "type": ss.alertType}
+  return {
+    "type": "hud",
+    "started": started,
+    "status": status,
+    "experimental": bool(ss.experimentalMode),
+    "enabled": bool(ss.enabled),
+    "vEgo": round(car_state.vEgo, 2),
+    "vEgoCluster": round(car_state.vEgoCluster, 2),
+    "setSpeed": round(set_speed, 1),
+    "metric": params.get("IsMetric", False),
+    "steeringAngle": round(car_state.steeringAngleDeg, 1),
+    "torque": round(torque_target(cs, car_state, sm["vehicleParameters"], sm["carControl"], sm["carOutput"], max_lat_accel), 3),
+    "torqueOut": round(-float(sm["carOutput"].actuatorsOutput.torque), 3),
+    "blindspot": params.get("BlindSpot", False),
+    "leftBlindspot": bool(car_state.leftBlindspot),
+    "rightBlindspot": bool(car_state.rightBlindspot),
+    "leftBlinker": bool(car_state.leftBlinker),
+    "rightBlinker": bool(car_state.rightBlinker),
+    "events": [e for e in events if e in HUD_EVENTS],
+    "alert": alert,
+    "dm": {
+      "seen": sm.recv_frame["driverMonitoringState"] > 0,
+      "active": str(dm.activePolicy) == "vision",
+      "rhd": bool(dm.isRHD),
+      "face": bool(vps.faceDetected),
+      "awareness": round(vps.awarenessPercent, 1),
+      "pitch": round(vps.pose.pitch, 3),
+      "yaw": round(vps.pose.yaw, 3),
+      "alwaysOn": params.get("AlwaysOnDM", False),
+    },
+    "brakeProb": round(max(preds.brakeDisengageProbs or [1]), 3),
+    "steerProb": round(max(preds.steerOverrideProbs or [1]), 3),
   }
 
 
@@ -235,6 +340,12 @@ class VideoHub:
     self._sizes: dict[str, tuple[int, int]] = {}
     self._camera_offset = 0.0
     self._offset_t = 0.0
+    self._hud_t = 0.0
+    self._hud_params: dict = {}
+    self._hud_params_t = 0.0
+    self._max_lat_accel = DEFAULT_MAX_LAT_ACCEL
+    self._status = "disengaged"
+    self._hud_failed = False
 
   # viewers ------------------------------------------------------------------
   def add(self, viewer: VideoViewer) -> None:
@@ -312,12 +423,14 @@ class VideoHub:
     import openpilot.cereal.messaging as messaging
     self._poller = messaging.Poller()
     self._socks = {cam: messaging.sub_sock(CAMERA_SOURCES[cam][0], poller=self._poller, conflate=False) for cam in CAMERAS}
-    self._sm = messaging.SubMaster(OVERLAY_SERVICES)
+    self._sm = messaging.SubMaster(OVERLAY_SERVICES + HUD_SERVICES)
     self.error = None
     try:   # carParams is published rarely; the UI reads the param too
       from opendbc.car.structs import car
       if cp := self.params.get("CarParams"):
-        self._long_control = bool(messaging.log_from_bytes(cp, car.CarParams).openpilotLongitudinalControl)
+        car_params = messaging.log_from_bytes(cp, car.CarParams)
+        self._long_control = bool(car_params.openpilotLongitudinalControl)
+        self._max_lat_accel = float(car_params.maxLateralAccel) or DEFAULT_MAX_LAT_ACCEL
     except Exception:
       pass
 
@@ -347,6 +460,33 @@ class VideoHub:
       self._update_calib()
     if sm.updated["modelV2"]:
       self._update_model()
+    if now - self._hud_t >= HUD_PERIOD_S:
+      self._hud_t = now
+      try:
+        self._update_hud(now)
+      except Exception:   # the mirror of the screen is extra: never let it take the video down
+        if not self._hud_failed:
+          cloudlog.exception("webhud: video hud")
+          self._hud_failed = True
+
+  def _update_hud(self, now: float) -> None:
+    sm = self._sm
+    if now - self._hud_params_t > 3.0:
+      self._hud_params_t = now
+      for key in HUD_PARAMS:
+        try:
+          self._hud_params[key] = bool(self.params.get_bool(key))
+        except Exception:
+          self._hud_params[key] = False
+    started = bool(sm["deviceState"].started) if sm.recv_frame["deviceState"] > 0 else False
+    if not started:
+      self._status = "disengaged"
+    elif sm.updated["selfdriveState"]:
+      self._status = ui_status(sm["selfdriveState"], sm["selfdriveStateSP"], sm["onroadEvents"])
+    if sm.updated["carParams"]:
+      self._max_lat_accel = float(sm["carParams"].maxLateralAccel) or DEFAULT_MAX_LAT_ACCEL
+    msg = hud_state(sm, started, self._status, self._hud_params, self._max_lat_accel)
+    self._broadcast(json.dumps(msg, separators=(",", ":")))
 
   def _update_calib(self) -> None:
     sm = self._sm

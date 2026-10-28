@@ -10,7 +10,8 @@ from types import SimpleNamespace as NS
 
 from openpilot.common.test import OpenpilotTestCase
 from openpilot.sunnypilot.webhud.video import (FLAG_KEY, FRAME_HEADER, MAX_QUEUED_FRAMES, V4L2_BUF_FLAG_KEYFRAME,
-                                               VideoViewer, camera_transforms, frame_message, model_overlay)
+                                               VideoViewer, camera_transforms, frame_message, hud_state, model_overlay,
+                                               torque_target, ui_status)
 from openpilot.sunnypilot.webhud.websocket import OP_BINARY, OP_TEXT, WebSocket, read_frame
 
 
@@ -60,7 +61,7 @@ class TestOverlay(OpenpilotTestCase):
     out = model_overlay(model, radar, NS(enabled=True, experimentalMode=False), NS(allowThrottle=True), True, 1.3, 0.04)
     assert out["frameId"] == 42 and out["frameIdExtra"] == 43
     assert out["path"] == [[0, 0.14, 0], [10, 0.24, 0.1]]       # camera offset added, as the UI does
-    assert out["leads"] == [{"d": 30.0, "y": -0.96, "v": -2.0}]  # radar's y is left
+    assert out["leads"] == [{"d": 30.0, "y": -0.96, "v": -2.0, "i": 0}]  # radar's y is left
     assert out["engaged"] and out["longControl"] and out["pathZ"] == 1.3
     json.dumps(out)
 
@@ -70,6 +71,82 @@ class TestOverlay(OpenpilotTestCase):
     kind, flags, cam, frame_id, ts = FRAME_HEADER.unpack_from(payload)
     assert key and flags == FLAG_KEY and cam == 1 and frame_id == 7 and ts == 123456789
     assert payload[FRAME_HEADER.size:] == b"\x00\x00\x00\x01\x67\x00\x00\x00\x01\x65"
+
+
+class _Which(NS):
+  def which(self):
+    return self.kind
+
+
+class _Enum(str):
+  @property
+  def raw(self):
+    return self.n
+
+
+def _enum(name, n=0):
+  e = _Enum(name)
+  e.n = n
+  return e
+
+
+def _ss(state="enabled", enabled=True, **kw):
+  fields = {"experimentalMode": False, "alertSize": _enum("none", 0), "alertStatus": _enum("normal", 0),
+            "alertText1": "", "alertText2": "", "alertHudVisual": "none", "alertType": ""}
+  return NS(state=state, enabled=enabled, **{**fields, **kw})
+
+
+def _mads(state="disabled", enabled=False, available=True):
+  return NS(mads=NS(state=state, enabled=enabled, available=available))
+
+
+class _SM(dict):
+  def __init__(self, *a, **kw):
+    super().__init__(*a, **kw)
+    self.recv_frame = dict.fromkeys(self, 1)
+
+
+class TestHud(OpenpilotTestCase):
+  def test_status_as_the_screen_colours_it(self):
+    assert ui_status(_ss(), _mads(available=False), []) == "engaged"
+    assert ui_status(_ss(enabled=False), _mads(available=False), []) == "disengaged"
+    assert ui_status(_ss(state="preEnabled"), _mads(), []) == "override"
+    assert ui_status(_ss(enabled=False), _mads(state="enabled", enabled=True), []) == "lat_only"   # MADS steering only
+    assert ui_status(_ss(), _mads(enabled=False), []) == "long_only"
+    assert ui_status(_ss(), _mads(state="paused", enabled=True), []) == "override"
+    assert ui_status(_ss(state="overriding"), _mads(enabled=True), [NS(overrideLongitudinal=True)]) == "override"
+
+  def test_torque_from_lateral_accel_or_the_actuator(self):
+    car_state = NS(vEgo=20.0)
+    cs = NS(lateralControlState=_Which(kind="curvatureState"), curvature=0.003, desiredCurvature=0.004)
+    vp, out = NS(roll=0.0), NS(actuatorsOutput=NS(torque=0.5))
+    # (0.003 * 400 + (0.004 - 0.003) * 400) / 3
+    assert abs(torque_target(cs, car_state, vp, NS(latActive=True), out, 3.0) - 1.6 / 3) < 1e-6
+    assert torque_target(cs, car_state, vp, NS(latActive=False), out, 3.0) == 0.0
+    assert torque_target(cs, NS(vEgo=50.0), vp, NS(latActive=True), out, 3.0) == 1.0
+    pid = NS(lateralControlState=_Which(kind="torqueState"))
+    assert torque_target(pid, car_state, vp, NS(latActive=True), out, 3.0) == -0.5   # the screen's sign
+
+  def test_hud_state(self):
+    ss = _ss(alertSize=_enum("mid", 2), alertStatus=_enum("userPrompt", 1), alertText1="Steer Unavailable", alertText2="x",
+             alertHudVisual="steerRequired", alertType="steerUnavailable/permanent")
+    dm = NS(activePolicy="vision", isRHD=False,
+            visionPolicyState=NS(faceDetected=True, awarenessPercent=80, pose=NS(pitch=0.1, yaw=-0.2)))
+    sm = _SM(controlsState=NS(lateralControlState=_Which(kind="torqueState"), deprecated=NS(vCruise=100.0)),
+             carState=NS(vEgo=10.0, vEgoCluster=10.5, vCruiseCluster=0.0, steeringAngleDeg=-12.34, leftBlindspot=True,
+                         rightBlindspot=False, leftBlinker=True, rightBlinker=False),
+             selfdriveState=ss, driverMonitoringState=dm, vehicleParameters=NS(roll=0.0), carControl=NS(latActive=True),
+             carOutput=NS(actuatorsOutput=NS(torque=-0.25)),
+             modelV2=NS(meta=NS(disengagePredictions=NS(brakeDisengageProbs=[0.1, 0.3], steerOverrideProbs=[]))),
+             onroadEvents=[NS(name="preLaneChangeLeft"), NS(name="pedalPressed")])
+    out = hud_state(sm, True, "engaged", {"IsMetric": True}, 3.0)
+    assert out["setSpeed"] == 100.0 and out["metric"]                  # the cluster's set speed, else controls'
+    assert out["torque"] == 0.25 and out["steeringAngle"] == -12.3
+    assert out["alert"]["size"] == 2 and out["alert"]["visual"] == "steerRequired"
+    assert out["events"] == ["preLaneChangeLeft"]
+    assert out["dm"]["active"] and out["dm"]["awareness"] == 80
+    assert out["brakeProb"] == 0.3 and out["steerProb"] == 1
+    json.dumps(out)
 
 
 class TestViewer(OpenpilotTestCase):

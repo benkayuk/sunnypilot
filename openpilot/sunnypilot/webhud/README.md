@@ -22,7 +22,9 @@ while no viewer is connected.
 **The camera view.** A second WebSocket, `/video` (`video.py`), carries the road camera for the page's
 camera view: the livestream encoder's H.264 (1280x720, a keyframe every 5 frames, the same stream comma's
 livestream sends) passed through untouched, and what the comma's own driving screen draws over it -- the
-model's path, lane lines, road edges and leads, with the camera projection from the calibration. The page
+model's path, lane lines, road edges and leads, with the camera projection from the calibration, and the rest of
+the comma 4 screen's state (`hud`: the status that colours it, set speed, steering angle and torque, the alert,
+driver monitoring, blind spots, the model's confidence) about 20 times a second, so the page can mirror it. The page
 decodes the video (WebCodecs) and draws the overlay itself, matched to each frame by frame id. While a
 viewer is connected `WebHudVideo` is set, and the manager runs camerad and `stream_encoderd` for it, onroad
 too (comma's own livestream stops at ignition); 10 s after the last viewer leaves it is cleared again.
@@ -70,7 +72,7 @@ op: [[service, t, extract], ...], mode, replay, server}}` at 20 Hz (the first ti
 snapshot of the latest frame of every message, with `reset`); the client sends `{type: replay, ...}`.
 WebSocket `/video?camera=road|wide`: binary frames (a 16-byte header `<BBHIQ`: kind 1, flags bit 0 =
 keyframe, camera 0 road / 1 wide, frameId, timestampEof ns; then the Annex B access unit) and text
-`{type: hello | calib | model | error}` (`video.py` has the fields); the client sends `{type: camera, camera}`.
+`{type: hello | calib | model | hud | error}` (`video.py` has the fields); the client sends `{type: camera, camera}`.
 
 Writes are accepted from private addresses only, never cross-origin, and CAN override changes, SSH keys and
 replay are refused while the car is moving (replay also stops itself if the car starts moving).
