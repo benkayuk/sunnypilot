@@ -236,6 +236,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     // sunnypilot car specific params
     {"FiskerACCAutoSpeed", {PERSISTENT | BACKUP, BOOL, "1"}},
     {"FiskerACCTerrain", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"FiskerBasicCruise", {PERSISTENT | BACKUP, BOOL, "0"}},  // VCU basic cruise engages too (no ACC coded)
     {"FiskerCanOverrides", {PERSISTENT | BACKUP, JSON}},  // edited from the web HUD, applied live by card
     {"FiskerLateralType", {PERSISTENT | BACKUP, BOOL, "0"}},
     // Not PERSISTENT: carstate writes this on RiBtnEast/RiBtnNorth edges, and it's reset

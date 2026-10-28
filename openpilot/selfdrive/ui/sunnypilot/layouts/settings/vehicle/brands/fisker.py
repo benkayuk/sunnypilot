@@ -13,7 +13,7 @@ class FiskerSettings(BrandSettings):
   def __init__(self):
     super().__init__()
 
-    # All three toggles plumb through to CP_SP flags via opendbc's _initialize_fisker;
+    # All four toggles plumb through to CP_SP flags via opendbc's _initialize_fisker;
     # the fisker carcontroller then feeds the current flag state into the ICC_0x52A
     # spoof packer / lateral-control builder every tick. Takes effect at start-of-drive
     # (CP_SP is built once per boot — flip toggles while offroad).
@@ -50,7 +50,16 @@ class FiskerSettings(BrandSettings):
       param="FiskerLateralType",
     )
 
-    self.items = [self.acc_auto_speed_toggle, self.acc_terrain_toggle, self.lateral_type_toggle]
+    # VCU_0x358 basic cruise as a second cruise source, in carstate and panda safety. Only for
+    # Oceans without ACC coded, whose ADAS ACC never leaves Off; with ACC coded leave it off.
+    self.basic_cruise_toggle = toggle_item_sp(
+      tr("Engage From Basic Cruise (no ACC coded)"),
+      tr("For Oceans without ACC coded: engage openpilot from the car's basic hold-speed cruise. " +
+         "It holds the set speed and won't slow for traffic. Leave off if your car has ACC."),
+      param="FiskerBasicCruise",
+    )
+
+    self.items = [self.acc_auto_speed_toggle, self.acc_terrain_toggle, self.lateral_type_toggle, self.basic_cruise_toggle]
 
   def update_settings(self):
     pass
