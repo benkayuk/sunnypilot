@@ -232,3 +232,29 @@ class TestServer(OpenpilotTestCase):
     assert frame[1] == 2 and acc.decode(bytes.fromhex(frame[2]))["ADAS_AccTrgSpdDisp"] == 60
     cs = next(d for w, _, d in tick["op"] if w == "carState")
     assert cs["vEgo"] > 0
+
+  def test_video_socket_runs_the_encoder_while_watched(self):
+    sock = socket.create_connection(("127.0.0.1", self.port), timeout=10)
+    key = base64.b64encode(os.urandom(16)).decode()
+    headers = ["GET /video?camera=wide HTTP/1.1", f"Host: 127.0.0.1:{self.port}", "Upgrade: websocket", "Connection: Upgrade",
+               f"Sec-WebSocket-Key: {key}", "Sec-WebSocket-Version: 13"]
+    sock.sendall(("\r\n".join(headers) + "\r\n\r\n").encode())
+    reader = sock.makefile("rb")
+    assert b"101" in reader.readline()
+    while reader.readline() not in (b"\r\n", b""):
+      pass
+    _, op, payload = read_frame(reader)
+    assert op == OP_TEXT and json.loads(payload) == {"type": "hello", "cameras": ["road", "wide"]}
+    end = time.monotonic() + 5
+    while not self.params.get_bool("WebHudVideo") and time.monotonic() < end:
+      time.sleep(0.05)
+    assert self.params.get_bool("WebHudVideo")
+
+    # the last viewer gone: the encoder is let go once the linger is over
+    with mock.patch("openpilot.sunnypilot.webhud.video.LINGER_S", 0.2):
+      reader.close()
+      sock.close()
+      end = time.monotonic() + 5
+      while self.params.get_bool("WebHudVideo") and time.monotonic() < end:
+        time.sleep(0.05)
+      assert not self.params.get_bool("WebHudVideo")

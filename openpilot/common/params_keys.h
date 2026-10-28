@@ -194,6 +194,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"ShowTurnSignals", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"StandstillTimer", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"TrueVEgoUI", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"WebHudVideo", {CLEAR_ON_MANAGER_START, BOOL}},  // the web HUD's camera view is open: run the livestream encoder
 
     // MADS params
     {"Mads", {PERSISTENT | BACKUP, BOOL, "1"}},
