@@ -19,6 +19,14 @@ fetches the OSM road tiles the page's map matcher reads (`maptiles.py`, mapd's o
 features from Overpass. `sunnypilot.local` is published over mDNS. The process is niced and reads nothing
 while no viewer is connected.
 
+**The camera view.** A second WebSocket, `/video` (`video.py`), carries the road camera for the page's
+camera view: the livestream encoder's H.264 (1280x720, a keyframe every 5 frames, the same stream comma's
+livestream sends) passed through untouched, and what the comma's own driving screen draws over it -- the
+model's path, lane lines, road edges and leads, with the camera projection from the calibration. The page
+decodes the video (WebCodecs) and draws the overlay itself, matched to each frame by frame id. While a
+viewer is connected `WebHudVideo` is set, and the manager runs camerad and `stream_encoderd` for it, onroad
+too (comma's own livestream stops at ignition); 10 s after the last viewer leaves it is cleared again.
+
 **It serves no page.** The Android app carries the page in its APK and relays `/api` and `/ws` here; on
 a PC, `python3 serve.py --bridge sunnypilot.local` in the Oceanfront View checkout does the same. `/`
 answers with a short text saying so. Set `WEBHUD_PAGE_DIR=<oceanfront-view checkout>` and the bridge
@@ -39,6 +47,7 @@ serves the page as well (`/`, `/vendor/`, `/models/`, `/dbc/` from that checkout
 | `dbc.py` | Small DBC reader/decoder (the demo encodes with it; the overrides API shows the ICC's live values through it). Oceanfront View's `static/js/world/dbc.js` is its twin in the page. |
 | `mdns.py` | Publishes `sunnypilot.local` as an alias + `_http._tcp` service through avahi's D-Bus API (jeepney); falls back to a built-in A-record responder. Doesn't change the device hostname. |
 | `maptiles.py` | OSM road tiles (mapd's cells, downloaded on first use), Overpass point features, and the prefetch of everything within a radius of the car. |
+| `video.py` | The camera view's `/video` socket: turns the livestream encoder on while watched, passes its frames through and sends the overlay and the camera projection. |
 | `websocket.py` | The WebSocket framing. |
 | `paths.py` | Where the DBCs are, and the optional page directory. |
 | `../selfdrive/car/can_overrides.py` | Validates/applies `FiskerCanOverrides`; card polls it at 10 Hz and updates the dicts carcontroller reads, in place. |
@@ -59,6 +68,9 @@ which the page decodes with), and the page with `WEBHUD_PAGE_DIR` set. WebSocket
 `{type: hello}` then `{type: tick, data: {now, reset?, brand, can: [[t, [[addr, bus, hex], ...]], ...],
 op: [[service, t, extract], ...], mode, replay, server}}` at 20 Hz (the first tick for a new viewer is a
 snapshot of the latest frame of every message, with `reset`); the client sends `{type: replay, ...}`.
+WebSocket `/video?camera=road|wide`: binary frames (a 16-byte header `<BBHIQ`: kind 1, flags bit 0 =
+keyframe, camera 0 road / 1 wide, frameId, timestampEof ns; then the Annex B access unit) and text
+`{type: hello | calib | model | error}` (`video.py` has the fields); the client sends `{type: camera, camera}`.
 
 Writes are accepted from private addresses only, never cross-origin, and CAN override changes, SSH keys and
 replay are refused while the car is moving (replay also stops itself if the car starts moving).
