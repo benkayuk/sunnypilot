@@ -49,7 +49,7 @@ from openpilot.sunnypilot.webhud.sources import LiveSource, ReplaySource, list_r
 from openpilot.sunnypilot.webhud.state import StreamBuilder, merge_ticks
 from openpilot.sunnypilot.webhud.video import VideoHub, VideoViewer
 from openpilot.sunnypilot.webhud.websocket import WebSocket, accept_key
-from openpilot.sunnypilot.webhud.maptiles import MapFeatures, MapPrefetch, MapTiles, parse_features_path, parse_tile_path, parse_ways_path
+from openpilot.sunnypilot.webhud.maptiles import MapFeatures, MapPrefetch, MapTiles, parse_features_path, parse_tile_path
 
 VERSION = "1.0"
 LANDING = f"""sunnypilot web HUD bridge {VERSION}
@@ -462,8 +462,6 @@ class HudHandler(BaseHTTPRequestHandler):
         return self._map_tile(path)
       if path.startswith("/map/features/") and method == "GET":
         return self._map_features(path)
-      if path.startswith("/map/ways/") and method == "GET":
-        return self._map_ways(path)
       if path == "/map/prefetch" and method == "POST":   # the page's position: download the map around it (maptiles.py MapPrefetch)
         body = self._json_body()
         return self._json(MAP_PREFETCH.request(float(body["lat"]), float(body["lon"]), float(body.get("radius_km", 25))))
@@ -514,16 +512,6 @@ class HudHandler(BaseHTTPRequestHandler):
     full = MAP_FEATURES.cell_path(klat, klon)
     if full is None:
       return self._error(404, "no features for this cell")
-    with open(full, "rb") as f:
-      body = f.read()
-    self._send(200, body, "application/json", {"Cache-Control": "max-age=86400"})
-
-  # a road tile's full way detail (maptiles.py MapFeatures.ways_path): from Overpass once, then from disk
-  def _map_ways(self, path: str) -> None:
-    tlat, tlon = parse_ways_path(unquote(path))
-    full = MAP_FEATURES.ways_path(tlat, tlon)
-    if full is None:
-      return self._error(404, "no road detail for this tile")
     with open(full, "rb") as f:
       body = f.read()
     self._send(200, body, "application/json", {"Cache-Control": "max-age=86400"})

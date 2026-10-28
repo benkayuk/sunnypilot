@@ -1,6 +1,5 @@
 """Regression coverage for bounded inputs and interrupted WebHUD I/O."""
 import io
-import json
 import math
 import os
 import tempfile
@@ -9,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from openpilot.sunnypilot.webhud import server, websocket
-from openpilot.sunnypilot.webhud.maptiles import MapFeatures, MapPrefetch, MapTiles, parse_ways_path
+from openpilot.sunnypilot.webhud.maptiles import MapFeatures, MapPrefetch, MapTiles
 from openpilot.sunnypilot.webhud.websocket import WebSocketClosed, encode_frame, read_frame
 
 
@@ -77,25 +76,3 @@ class TestIORegressions(unittest.TestCase):
         with self.assertRaises(ValueError):
           prefetch.request(51.5, -0.1, radius)
       assert prefetch._thread is None
-
-  def test_road_detail_kept_per_tile_with_only_the_lane_tags(self):
-    with tempfile.TemporaryDirectory() as root:
-      feats = MapFeatures(root)
-      asked = []
-      def overpass(query):
-        asked.append(query)
-        return {"elements": [
-          {"type": "way", "id": 7, "tags": {"highway": "primary", "lanes": "3", "lanes:forward": "2", "name": "High St"}},
-          {"type": "way", "id": 8, "tags": {"highway": "service"}},
-        ]}
-      feats._overpass = overpass
-      path = feats.ways_path(205, -2)
-      with open(path) as f:
-        out = json.load(f)
-      assert out["tile"] == [205, -2] and out["ways"] == {"7": {"lanes": "3", "lanes:forward": "2"}}
-      assert "51.2500,-0.5000,51.5000,-0.2500" in asked[0] and feats.have_ways(205, -2)
-      assert feats.ways_path(205, -2) == path and len(asked) == 1   # from disk after that
-      assert parse_ways_path("/map/ways/205/-2") == (205, -2)
-      with self.assertRaises(ValueError):
-        parse_ways_path("/map/ways/205")
-
