@@ -13,7 +13,10 @@ downloaded from pfeiferj's server (what mapd does too) and unpacked next to mapd
 The tiles hold roads only. The point features along them the page draws (traffic signals, stop and
 give-way signs, crossings, level crossings, traffic calming; mapfeatures.js) come from the Overpass API
 in cells of FEAT_DEG square, GET /map/features/<klat>/<klon> (the cell's south-west corner in units of
-FEAT_DEG), fetched once per cell and kept under <mapd root>/features/ as compact JSON.
+FEAT_DEG), fetched once per cell and kept under <mapd root>/features/ as compact JSON. So does the roads' full
+detail the tiles leave out (the page's roaddetail.js: lanes each way, turn arrows, widths, roundabouts): the tags
+of every road way in a road tile that has any, GET /map/ways/<tlat>/<tlon> (units of FEAT_TILE_DEG), kept as
+ways_<tlat>_<tlon>.json {tile, at, ways: {<osm id>: {tag: value}}}.
 """
 import json
 import math
@@ -132,6 +135,11 @@ FEATURE_QUERY = """[out:json][timeout:120];
 out body;"""
 KEEP_TAGS = ("highway", "railway", "direction", "traffic_signals:direction", "traffic_signals", "crossing", "crossing:markings",
              "stop", "traffic_calming")
+WAYS_QUERY = """[out:json][timeout:120];
+way["highway"~"^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|service)(_link)?$"][~"^(lanes|width|est_width|turn:lanes|junction)"~"."]({s},{w},{n},{e});
+out tags;"""
+WAY_TAGS = ("width", "est_width", "lanes", "lanes:forward", "lanes:backward", "lanes:both_ways", "turn:lanes",
+            "turn:lanes:forward", "turn:lanes:backward", "junction")
 USER_AGENT = "sunnypilot-webhud/1.0 (map features; github.com/sunnypilot/sunnypilot)"
 
 
@@ -169,28 +177,76 @@ class MapFeatures:
 
   def ensure_tile(self, tlat: int, tlon: int) -> bool:
     """Fetch the tile's features (all its cells) unless already on disk. True when they are."""
-    if self.have_tile(tlat, tlon):
+    return self._ensure(("features", tlat, tlon), lambda: self.have_tile(tlat, tlon), lambda: self._fetch_tile(tlat, tlon))
+
+  def _ways_file(self, tlat: int, tlon: int) -> str:
+    return os.path.join(self.root, f"ways_{tlat}_{tlon}.json")
+
+  def have_ways(self, tlat: int, tlon: int) -> bool:
+    return os.path.isfile(self._ways_file(tlat, tlon))
+
+  def ways_path(self, tlat: int, tlon: int) -> str | None:
+    """The road tile's way detail file, fetching it first if needed; None when it can't be had."""
+    if not (-90 / FEAT_TILE_DEG <= tlat < 90 / FEAT_TILE_DEG and -180 / FEAT_TILE_DEG <= tlon < 180 / FEAT_TILE_DEG):
+      raise ValueError("not a road tile")
+    if not self.ensure_ways(tlat, tlon):
+      return None
+    path = self._ways_file(tlat, tlon)
+    return path if os.path.isfile(path) else None
+
+  def ensure_ways(self, tlat: int, tlon: int) -> bool:
+    """Fetch the road tile's way detail unless already on disk. True when it is."""
+    return self._ensure(("ways", tlat, tlon), lambda: self.have_ways(tlat, tlon), lambda: self._fetch_ways(tlat, tlon))
+
+  def _ensure(self, key: tuple, have, fetch) -> bool:
+    if have():
       return True
     if not self.download:
       return False
     with self._lock:
-      if self.have_tile(tlat, tlon):
+      if have():
         return True
-      if time.monotonic() - self._failed.get((tlat, tlon), -1e9) < RETRY_S:
+      if time.monotonic() - self._failed.get(key, -1e9) < RETRY_S:
         return False
       try:
-        self._fetch_tile(tlat, tlon)
+        fetch()
       except Exception:
-        cloudlog.exception(f"webhud: map features tile {tlat}/{tlon} failed")
-        self._failed[(tlat, tlon)] = time.monotonic()
+        cloudlog.exception(f"webhud: map {key[0]} tile {key[1]}/{key[2]} failed")
+        self._failed[key] = time.monotonic()
         return False
     return True
 
-  def _fetch_tile(self, tlat: int, tlon: int) -> None:
+  @staticmethod
+  def _bbox(tlat: int, tlon: int) -> dict:
     s, w = tlat * FEAT_TILE_DEG, tlon * FEAT_TILE_DEG
-    bbox = {"s": f"{s:.4f}", "w": f"{w:.4f}", "n": f"{s + FEAT_TILE_DEG:.4f}", "e": f"{w + FEAT_TILE_DEG:.4f}"}
-    query = FEATURE_QUERY.format(**bbox)
+    return {"s": f"{s:.4f}", "w": f"{w:.4f}", "n": f"{s + FEAT_TILE_DEG:.4f}", "e": f"{w + FEAT_TILE_DEG:.4f}"}
+
+  def _fetch_ways(self, tlat: int, tlon: int) -> None:
+    bbox = self._bbox(tlat, tlon)
+    cloudlog.info(f"webhud: fetching road detail {tlat}/{tlon} ({bbox['s']},{bbox['w']})")
+    data = self._overpass(WAYS_QUERY.format(**bbox))
+    ways = {}
+    for el in data.get("elements", []):
+      if el.get("type") != "way":
+        continue
+      tags = {k: v for k, v in (el.get("tags") or {}).items() if k in WAY_TAGS}
+      if tags:
+        ways[str(el["id"])] = tags
+    os.makedirs(self.root, exist_ok=True)
+    now = int(time.time())  # noqa: TID251 - persisted Unix timestamp, not an elapsed interval
+    path = self._ways_file(tlat, tlon)
+    with open(path + ".part", "w") as f:
+      json.dump({"tile": [tlat, tlon], "at": now, "ways": ways}, f, separators=(",", ":"))
+    os.replace(path + ".part", path)
+    cloudlog.info(f"webhud: road detail {tlat}/{tlon}: {len(ways)} ways")
+
+  def _fetch_tile(self, tlat: int, tlon: int) -> None:
+    bbox = self._bbox(tlat, tlon)
     cloudlog.info(f"webhud: fetching map features {tlat}/{tlon} ({bbox['s']},{bbox['w']})")
+    data = self._overpass(FEATURE_QUERY.format(**bbox))
+    self._write_cells(tlat, tlon, data)
+
+  def _overpass(self, query: str) -> dict:
     req = urllib.request.Request(OVERPASS_URL, data=urllib.parse.urlencode({"data": query}).encode(),
                                  headers={"User-Agent": USER_AGENT, "Accept": "application/json",
                                           "Content-Type": "application/x-www-form-urlencoded"})
@@ -204,6 +260,9 @@ class MapFeatures:
         if e.code not in (429, 504) or attempt == OVERPASS_TRIES - 1:
           raise
         time.sleep(OVERPASS_RETRY_S)
+    return data
+
+  def _write_cells(self, tlat: int, tlon: int, data: dict) -> None:
     # split into the page's cells (a node on the tile's far edge stays in this tile)
     cells: dict[tuple[int, int], list] = {
       (tlat * CELLS_PER_TILE + i, tlon * CELLS_PER_TILE + j): []
@@ -237,6 +296,14 @@ def parse_features_path(path: str) -> tuple[int, int]:
   parts = path.split("/")
   if len(parts) != 5 or parts[1] != "map" or parts[2] != "features":
     raise ValueError("not a features path")
+  return int(parts[3]), int(parts[4])
+
+
+def parse_ways_path(path: str) -> tuple[int, int]:
+  """'/map/ways/<tlat>/<tlon>' -> (tlat, tlon); ValueError when it isn't one."""
+  parts = path.split("/")
+  if len(parts) != 5 or parts[1] != "map" or parts[2] != "ways":
+    raise ValueError("not a ways path")
   return int(parts[3]), int(parts[4])
 
 
@@ -338,6 +405,11 @@ class MapPrefetch:
               self._status["errors"] += 1
           if not self.features.have_tile(*tile):
             if not self.features.ensure_tile(*tile):
+              with self._lock:
+                self._status["errors"] += 1
+            time.sleep(PREFETCH_PAUSE_S)
+          if not self.features.have_ways(*tile):
+            if not self.features.ensure_ways(*tile):
               with self._lock:
                 self._status["errors"] += 1
             time.sleep(PREFETCH_PAUSE_S)
