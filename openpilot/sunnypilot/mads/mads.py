@@ -97,8 +97,14 @@ class ModularAssistiveDrivingSystem:
     # MFS_RiBtnNorth (ACC only) or MFS_RiBtnEast (ACC + lateral). carstate tracks the
     # last-pressed main button and writes the FiskerMadsArmed param. Block UEM when the
     # user hasn't armed lateral via East — defaults to "safer" after an ignition cycle.
-    if self.CP.brand == "fisker" and not self.fisker_mads_armed:
-      return True
+    # Read the param fresh here rather than relying on read_params(): that only runs every
+    # 100 ms, while ACC engages 60-100 ms after the East press, so the cached value is
+    # often still False and the engagement silently comes up ACC-only. carstate writes
+    # the param before publishing the carState that carries the enable, so this is current.
+    if self.CP.brand == "fisker":
+      self.fisker_mads_armed = self.params.get_bool("FiskerMadsArmed")
+      if not self.fisker_mads_armed:
+        return True
 
     if self.enabled:
       return True
