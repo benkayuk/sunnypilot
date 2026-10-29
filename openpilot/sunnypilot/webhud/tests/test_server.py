@@ -177,6 +177,14 @@ class TestServer(OpenpilotTestCase):
         status, body, _ = self.request("GET", "/api/params")
         assert status == 200 and json.loads(body)[key] is enabled
 
+  def test_adasis_meta_params(self):
+    # speed-limit unit / traffic side / country the ADAS is told (panda's ICC_0x362 fix-up)
+    body = {"FiskerSpeedLimitUnit": 1, "FiskerTrafficSide": 1, "FiskerCountryCode": 826}
+    status, out, _ = self.request("PUT", "/api/params", body)
+    assert status == 200 and all(json.loads(out)[k] == v for k, v in body.items())
+    for bad in ({"FiskerSpeedLimitUnit": 4}, {"FiskerTrafficSide": 3}, {"FiskerCountryCode": 1000}, {"FiskerCountryCode": -1}):
+      assert self.request("PUT", "/api/params", bad)[0] == 400
+
   def test_ssh_keys(self):
     # the Oceanfront View app's key joins whatever keys are there, once, and SSH comes on; revoking takes only it
     blob = b"\x00\x00\x00\x13ecdsa-sha2-nistp256" + b"\x00\x00\x00\x08nistp256" + b"\x00\x00\x00\x41\x04" + bytes(64)
