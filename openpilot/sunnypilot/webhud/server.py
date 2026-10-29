@@ -81,6 +81,10 @@ PARAM_ALLOWLIST: dict[str, tuple[type, Callable[[int], bool] | None]] = {
   "IsMetric": (bool, None),
   "FiskerACCAutoSpeed": (bool, None),   # these two are the 0x52A spoof's baseline; ICC_0x52A overrides win
   "FiskerACCTerrain": (bool, None),
+  # what panda tells the ADAS in the head unit's map metadata (0x362); applied at the next car start
+  "FiskerSpeedLimitUnit": (int, lambda v: v in (0, 1, 2, 3)),
+  "FiskerTrafficSide": (int, lambda v: v in (0, 1, 2)),
+  "FiskerCountryCode": (int, lambda v: 0 <= v <= 999),
 }
 
 

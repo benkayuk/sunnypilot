@@ -120,8 +120,11 @@ def initialize_params(params) -> list[dict[str, Any]]:
     "FiskerACCAutoSpeed",
     "FiskerACCTerrain",
     "FiskerBasicCruise",
+    "FiskerCountryCode",
     "FiskerLateralType",
     "FiskerMadsArmed",
+    "FiskerSpeedLimitUnit",
+    "FiskerTrafficSide",
   ])
 
   # hyundai
