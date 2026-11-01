@@ -236,6 +236,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     // sunnypilot car specific params
     {"FiskerACCAutoSpeed", {PERSISTENT | BACKUP, BOOL, "1"}},
     {"FiskerACCTerrain", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"FiskerAdasAuto", {PERSISTENT | BACKUP, BOOL, "1"}},  // the three ADASIS META settings below follow the GPS country
+    {"FiskerAdasAutoCountry", {PERSISTENT, STRING}},  // the country FiskerAdasAuto went by at the last car start
     {"FiskerBasicCruise", {PERSISTENT | BACKUP, BOOL, "0"}},  // VCU basic cruise engages too (no ACC coded)
     {"FiskerCanOverrides", {PERSISTENT | BACKUP, JSON}},  // edited from the web HUD, applied live by card
     {"FiskerCountryCode", {PERSISTENT | BACKUP, INT, "0"}},  // ADASIS META country to the ADAS; 0 = the ICC's

@@ -184,6 +184,11 @@ class TestServer(OpenpilotTestCase):
     assert status == 200 and all(json.loads(out)[k] == v for k, v in body.items())
     for bad in ({"FiskerSpeedLimitUnit": 4}, {"FiskerTrafficSide": 3}, {"FiskerCountryCode": 1000}, {"FiskerCountryCode": -1}):
       assert self.request("PUT", "/api/params", bad)[0] == 400
+    # Auto from GPS can be turned off and on; the country it went by is read-only
+    for on in (False, True):
+      status, out, _ = self.request("PUT", "/api/params", {"FiskerAdasAuto": on})
+      assert status == 200 and json.loads(out)["FiskerAdasAuto"] is on
+    assert self.request("PUT", "/api/params", {"FiskerAdasAutoCountry": "France"})[0] == 400
 
   def test_ssh_keys(self):
     # the Oceanfront View app's key joins whatever keys are there, once, and SSH comes on; revoking takes only it
