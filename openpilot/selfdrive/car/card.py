@@ -26,6 +26,7 @@ from openpilot.selfdrive.car.helpers import convert_carControlSP, convert_to_cap
 from openpilot.sunnypilot.mads.helpers import set_alternative_experience, set_car_specific_params
 from openpilot.sunnypilot.selfdrive.car import interfaces as sunnypilot_interfaces
 from openpilot.sunnypilot.selfdrive.car.can_overrides import CanOverrides
+from openpilot.sunnypilot.selfdrive.car.fisker_takeover import takeover_torque
 
 REPLAY = "REPLAY" in os.environ
 
@@ -300,6 +301,8 @@ class Car:
       self.v_cruise_helper.read_custom_set_speed_params()
       if self.can_overrides is not None:
         self.can_overrides.poll(self.params)
+      if self.CP.brand == "fisker":
+        self.CI.CS.override_torque = takeover_torque(self.params)
 
       time.sleep(0.1)
 
