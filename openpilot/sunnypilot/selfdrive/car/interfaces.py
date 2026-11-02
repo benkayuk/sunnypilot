@@ -125,6 +125,7 @@ def initialize_params(params) -> list[dict[str, Any]]:
     "FiskerCountryCode",
     "FiskerLateralType",
     "FiskerMadsArmed",
+    "FiskerOverrideTorque",
     "FiskerSpeedLimitUnit",
     "FiskerTrafficSide",
   ])
