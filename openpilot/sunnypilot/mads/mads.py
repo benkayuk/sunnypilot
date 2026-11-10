@@ -195,6 +195,10 @@ class ModularAssistiveDrivingSystem:
       if be.type == ButtonType.cancel:
         if not self.selfdrive.enabled and self.selfdrive.enabled_prev:
           self.events_sp.add(EventNameSP.manualLongitudinalRequired)
+        # Fisker: MFS_RiBtnEast pressed while ACC is engaged comes through as cancel (fisker.carstate).
+        # Panda hands the car a North press, which cancels ACC; steering goes off with it.
+        if self.CP.brand == "fisker" and be.pressed and self.enabled:
+          self.events_sp.add(EventNameSP.lkasDisable)
       if be.type == ButtonType.lkas and be.pressed and (CS.cruiseState.available or self.allow_always):
         if self.enabled:
           if self.selfdrive.enabled:
