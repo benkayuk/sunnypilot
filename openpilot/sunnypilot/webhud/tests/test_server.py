@@ -177,6 +177,28 @@ class TestServer(OpenpilotTestCase):
         status, body, _ = self.request("GET", "/api/params")
         assert status == 200 and json.loads(body)[key] is enabled
 
+  def test_adasis_meta_params(self):
+    # speed-limit unit / traffic side / country the ADAS is told (panda's ICC_0x362 fix-up)
+    body = {"FiskerSpeedLimitUnit": 1, "FiskerTrafficSide": 1, "FiskerCountryCode": 826}
+    status, out, _ = self.request("PUT", "/api/params", body)
+    assert status == 200 and all(json.loads(out)[k] == v for k, v in body.items())
+    for bad in ({"FiskerSpeedLimitUnit": 4}, {"FiskerTrafficSide": 3}, {"FiskerCountryCode": 1000}, {"FiskerCountryCode": -1}):
+      assert self.request("PUT", "/api/params", bad)[0] == 400
+    # Auto from GPS can be turned off and on; the country it went by is read-only
+    for on in (False, True):
+      status, out, _ = self.request("PUT", "/api/params", {"FiskerAdasAuto": on})
+      assert status == 200 and json.loads(out)["FiskerAdasAuto"] is on
+    assert self.request("PUT", "/api/params", {"FiskerAdasAutoCountry": "France"})[0] == 400
+
+  def test_override_torque_param(self):
+    # the takeover torque (OceanScape's slider): 1.5-6.4 Nm, 6.5 = the EPS's own; writable while the car moves
+    self.server.engine.monitor.moving = True
+    status, out, _ = self.request("PUT", "/api/params", {"FiskerOverrideTorque": 4.2})
+    assert status == 200 and json.loads(out)["FiskerOverrideTorque"] == 4.2
+    assert self.request("PUT", "/api/params", {"FiskerOverrideTorque": 6.5})[0] == 200
+    for bad in (1.4, 6.6, "nan"):
+      assert self.request("PUT", "/api/params", {"FiskerOverrideTorque": bad})[0] == 400
+
   def test_ssh_keys(self):
     # the Oceanfront View app's key joins whatever keys are there, once, and SSH comes on; revoking takes only it
     blob = b"\x00\x00\x00\x13ecdsa-sha2-nistp256" + b"\x00\x00\x00\x08nistp256" + b"\x00\x00\x00\x41\x04" + bytes(64)

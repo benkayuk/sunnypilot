@@ -236,14 +236,20 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     // sunnypilot car specific params
     {"FiskerACCAutoSpeed", {PERSISTENT | BACKUP, BOOL, "1"}},
     {"FiskerACCTerrain", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"FiskerAdasAuto", {PERSISTENT | BACKUP, BOOL, "1"}},  // the three ADASIS META settings below follow the GPS country
+    {"FiskerAdasAutoCountry", {PERSISTENT, STRING}},  // the country FiskerAdasAuto went by at the last car start
     {"FiskerBasicCruise", {PERSISTENT | BACKUP, BOOL, "0"}},  // VCU basic cruise engages too (no ACC coded)
     {"FiskerCanOverrides", {PERSISTENT | BACKUP, JSON}},  // edited from the web HUD, applied live by card
+    {"FiskerCountryCode", {PERSISTENT | BACKUP, INT, "0"}},  // ADASIS META country to the ADAS; 0 = the ICC's
     {"FiskerLateralType", {PERSISTENT | BACKUP, BOOL, "0"}},
     // Not PERSISTENT: carstate writes this on RiBtnEast/RiBtnNorth edges, and it's reset
     // to False each ignition cycle so a fresh drive always starts in the safer "ACC-only"
     // state. mads.block_unified_engagement_mode reads it to decide whether UEM should
     // engage lateral alongside the cruise→Active transition on fisker.
     {"FiskerMadsArmed", {CLEAR_ON_MANAGER_START, BOOL, "0"}},
+    {"FiskerOverrideTorque", {PERSISTENT | BACKUP, FLOAT, "3.0"}},  // driver-takeover torque (Nm), live; 6.5 = the EPS's own
+    {"FiskerSpeedLimitUnit", {PERSISTENT | BACKUP, INT, "0"}},  // sign unit to the ADAS: 0 dash, 1 mph, 2 km/h, 3 the ICC's
+    {"FiskerTrafficSide", {PERSISTENT | BACKUP, INT, "0"}},  // traffic side to the ADAS: 0 the ICC's, 1 left, 2 right
     // Fisker remote-control (phone-over-wifi) params. All CLEAR_ON_MANAGER_START
     // so a fresh boot always comes up with the app disabled and no stale angle.
     // Written by openpilot/sunnypilot/selfdrive/remote_control/remote_control_server.py;

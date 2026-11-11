@@ -10,6 +10,7 @@ from opendbc.car import structs
 from opendbc.car.interfaces import CarInterfaceBase
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
+from openpilot.sunnypilot.selfdrive.car.fisker_region import auto_adas_meta
 from openpilot.sunnypilot.selfdrive.controls.lib.nnlc.helpers import get_nn_model_path
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.helpers import set_speed_limit_assist_availability
 
@@ -119,9 +120,14 @@ def initialize_params(params) -> list[dict[str, Any]]:
   keys.extend([
     "FiskerACCAutoSpeed",
     "FiskerACCTerrain",
+    "FiskerAdasAuto",
     "FiskerBasicCruise",
+    "FiskerCountryCode",
     "FiskerLateralType",
     "FiskerMadsArmed",
+    "FiskerOverrideTorque",
+    "FiskerSpeedLimitUnit",
+    "FiskerTrafficSide",
   ])
 
   # hyundai
@@ -147,4 +153,7 @@ def initialize_params(params) -> list[dict[str, Any]]:
     "ToyotaStopAndGoHack",
   ])
 
-  return [{k: params.get(k, return_default=True)} for k in keys]
+  values = {k: params.get(k, return_default=True) for k in keys}
+  # the ADAS's map metadata settings from the country the car is in, when they're on Auto (fisker_region.py)
+  values.update(auto_adas_meta(params) or {})
+  return [{k: v} for k, v in values.items()]
