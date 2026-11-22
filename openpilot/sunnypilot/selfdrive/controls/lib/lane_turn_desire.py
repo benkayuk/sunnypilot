@@ -8,7 +8,7 @@ from openpilot.cereal import custom
 
 from openpilot.common.constants import CV
 from openpilot.common.params import Params
-from openpilot.sunnypilot.selfdrive.controls.lib.route_turn import lane_turn_speed, route_turn_desire
+from openpilot.sunnypilot.selfdrive.controls.lib.route_turn import DEFAULT_LIMITS, lane_turn_speed, route_turn_desire, route_turn_limits
 
 TurnDirection = custom.ModelDataV2SP.TurnDirection
 
@@ -24,10 +24,12 @@ class LaneTurnController:
     self.lane_turn_value = float(self.params.get("LaneTurnValue", return_default=True)) * CV.MPH_TO_MS
     self.param_read_counter = 0
     self.enabled = self.params.get_bool("LaneTurnDesire")
+    self.route_turn_limits = DEFAULT_LIMITS
 
   def read_params(self):
     self.enabled = self.params.get_bool("LaneTurnDesire")
     self.lane_turn_value = lane_turn_speed(self.params)
+    self.route_turn_limits = route_turn_limits(self.params)
 
   def update_params(self) -> None:
     if self.param_read_counter % 50 == 0:
@@ -38,7 +40,7 @@ class LaneTurnController:
                        route_turn=None) -> None:
     # a signalled turn on the car's navigation route, independent of the LaneTurnDesire toggle (route_turn.py)
     self.route_turn_direction = route_turn_desire(route_turn, left_blinker, right_blinker, blindspot_left, blindspot_right,
-                                                  v_ego, self.lane_turn_value)
+                                                  v_ego, self.lane_turn_value, self.route_turn_limits)
     if left_blinker and not right_blinker and v_ego < self.lane_turn_value and not blindspot_left:
       self.turn_direction = TurnDirection.turnLeft
     elif right_blinker and not left_blinker and v_ego < self.lane_turn_value and not blindspot_right:

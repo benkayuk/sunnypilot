@@ -24,6 +24,7 @@ BUS_RADAR = 1    # the mid-range radar's private CAN
 BUS_CAM = 2      # OEM ADAS module side
 RADAR_SLOTS = frozenset(range(0x310, 0x330))   # radar object slots; an unused one carries ID 0 in bytes 3-4
 MERGE_LIMIT = 60   # ticks a slow client may fall behind before it's started over
+THROTTLED = {"carStateSP": 0.1}   # s between the services' updates the page gets, for the fast ones it needs slowly
 
 
 class StreamBuilder:
@@ -83,6 +84,9 @@ class StreamBuilder:
 
   def feed_service(self, which: str, msg, t: float) -> None:
     extractor = EXTRACTORS.get(which)
+    # carStateSP comes at 100 Hz for a route turn the page needs at a few: 10 Hz is plenty
+    if which in THROTTLED and t - self.service_t.get(which, -1e9) < THROTTLED[which]:
+      return
     if extractor is not None:
       self.feed_extract(which, extractor(msg), t)
 

@@ -31,7 +31,7 @@ from openpilot.sunnypilot import get_sanitize_int_param
 from openpilot.sunnypilot.selfdrive.car.car_specific import CarSpecificEventsSP
 from openpilot.sunnypilot.selfdrive.car.cruise_helpers import CruiseHelper
 from openpilot.sunnypilot.selfdrive.car.intelligent_cruise_button_management.controller import IntelligentCruiseButtonManagement
-from openpilot.sunnypilot.selfdrive.controls.lib.route_turn import route_turn_prompt
+from openpilot.sunnypilot.selfdrive.controls.lib.route_turn import DEFAULT_LIMITS, route_turn_limits, route_turn_prompt
 from openpilot.sunnypilot.selfdrive.selfdrived.button_state_tracker import ButtonStateTracker
 from openpilot.sunnypilot.selfdrive.selfdrived.events import EventsSP
 
@@ -116,6 +116,7 @@ class SelfdriveD(CruiseHelper):
 
     # read params
     self.is_metric = self.params.get_bool("IsMetric")
+    self.route_turn_limits = DEFAULT_LIMITS
     self.is_ldw_enabled = self.params.get_bool("IsLdwEnabled")
     self.disengage_on_accelerator = self.params.get_bool("DisengageOnAccelerator")
 
@@ -381,7 +382,8 @@ class SelfdriveD(CruiseHelper):
 
     # Ask the driver to signal a coming turn on the car's navigation route while sunnypilot steers (route_turn.py)
     if self.sm['carControl'].latActive:
-      route_turn_signal = route_turn_prompt(self.sm['carStateSP'].routeTurn, CS.leftBlinker, CS.rightBlinker)
+      route_turn_signal = route_turn_prompt(self.sm['carStateSP'].routeTurn, CS.leftBlinker, CS.rightBlinker,
+                                            self.route_turn_limits)
       if route_turn_signal == TurnDirection.turnLeft:
         self.events_sp.add(custom.OnroadEventSP.EventName.routeTurnLeftAhead)
       elif route_turn_signal == TurnDirection.turnRight:
@@ -696,6 +698,8 @@ class SelfdriveD(CruiseHelper):
       self.disengage_on_accelerator = self.params.get_bool("DisengageOnAccelerator")
       self.experimental_mode = self.params.get_bool("ExperimentalMode") and self.CP.openpilotLongitudinalControl
       self.personality = self.params.get("LongitudinalPersonality", return_default=True)
+
+      self.route_turn_limits = route_turn_limits(self.params)
 
       self.mads.read_params()
       time.sleep(0.1)

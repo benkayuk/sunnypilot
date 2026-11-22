@@ -8,7 +8,8 @@ from opendbc.car.structs import car
 
 from openpilot.common.constants import CV
 from openpilot.common.params import Params
-from openpilot.sunnypilot.selfdrive.controls.lib.route_turn import TurnDirection, lane_turn_speed, route_turn_desire
+from openpilot.sunnypilot.selfdrive.controls.lib.route_turn import DEFAULT_LIMITS, TurnDirection, lane_turn_speed, route_turn_desire, \
+  route_turn_limits
 
 
 class BlinkerPauseLateral:
@@ -22,6 +23,7 @@ class BlinkerPauseLateral:
     self.blinker_off_timer = 0.0
     self.lane_turn_speed = lane_turn_speed(self.params)
     self.route_turn_blinker = None  # the blinker of the route turn the model is taking (route_turn.py)
+    self.route_turn_limits = DEFAULT_LIMITS
 
   def get_params(self) -> None:
     self.enabled = self.params.get_bool("BlinkerPauseLateralControl")
@@ -29,6 +31,7 @@ class BlinkerPauseLateral:
     self.min_speed = self.params.get("BlinkerMinLateralControlSpeed", return_default=True)
     self.reengage_delay = self.params.get("BlinkerLateralReengageDelay", return_default=True)
     self.lane_turn_speed = lane_turn_speed(self.params)
+    self.route_turn_limits = route_turn_limits(self.params)
 
   def update(self, CS: car.CarState, DT_CTRL: float = 0.01, route_turn=None) -> bool:
     if not self.enabled:
@@ -39,7 +42,7 @@ class BlinkerPauseLateral:
     # At a signalled turn on the navigation route the model is asked to take the turn, so keep steering on,
     # until that blinker goes off rather than when the request ends mid-turn
     turn = route_turn_desire(route_turn, CS.leftBlinker, CS.rightBlinker, CS.leftBlindspot, CS.rightBlindspot,
-                             CS.vEgo, self.lane_turn_speed)
+                             CS.vEgo, self.lane_turn_speed, self.route_turn_limits)
     if turn != TurnDirection.none:
       self.route_turn_blinker = "left" if turn == TurnDirection.turnLeft else "right"
     elif self.route_turn_blinker != ("left" if CS.leftBlinker else "right") or not one_blinker:

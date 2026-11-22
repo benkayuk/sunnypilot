@@ -45,6 +45,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.sunnypilot.selfdrive.car.fisker_takeover import valid as takeover_torque_valid
 from openpilot.sunnypilot.webhud.demo import DemoSource
 from openpilot.sunnypilot.webhud.mdns import MdnsPublisher, ipv4_interfaces
+from openpilot.sunnypilot.webhud.navturn import NavTurnPublisher
 from openpilot.sunnypilot.webhud.paths import STATIC_DIR, STATIC_FILES, STATIC_ROOTS
 from openpilot.sunnypilot.webhud.sources import LiveSource, ReplaySource, list_routes
 from openpilot.sunnypilot.webhud.state import StreamBuilder, merge_ticks
@@ -91,6 +92,10 @@ PARAM_ALLOWLIST: dict[str, tuple[type, Callable[[int], bool] | None]] = {
   "FiskerCountryCode": (int, lambda v: 0 <= v <= 999),
   # driver-takeover torque (Nm), applied live by card, so editable while driving; 6.5 = the EPS's own
   "FiskerOverrideTorque": (float, lambda v: takeover_torque_valid(v)),
+  # route turns (route_turn.py), m from the turn point; OceanScape's Driving > Nav
+  "RouteTurnPromptDistance": (float, lambda v: 30 <= v <= 500),
+  "RouteTurnStartDistance": (float, lambda v: 5 <= v <= 100),
+  "RouteTurnEndDistance": (float, lambda v: 0 <= v <= 50),
 }
 
 
@@ -388,6 +393,16 @@ class HudServer(ThreadingHTTPServer):
   mdns: MdnsPublisher | None
 
 
+NAV_TURN = NavTurnPublisher()
+
+
+def _private(host: str) -> bool:
+  try:
+    return ipaddress.ip_address(host).is_private
+  except ValueError:
+    return False
+
+
 MAP_TILES = MapTiles()
 MAP_FEATURES = MapFeatures()
 MAP_PREFETCH = MapPrefetch(MAP_TILES, MAP_FEATURES)
@@ -664,6 +679,8 @@ class HudHandler(BaseHTTPRequestHandler):
       replay_command(self.server.engine, data)
     elif kind == "ping":
       client.push(json.dumps({"type": "pong", "t": data.get("t")}))
+    elif kind == "routeTurn" and _private(client.peer):   # the nav app's next turn, for card (navturn.py)
+      NAV_TURN.publish(data)
 
 
 def status_payload(server: HudServer) -> dict:

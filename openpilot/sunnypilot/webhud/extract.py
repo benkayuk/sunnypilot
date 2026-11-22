@@ -14,7 +14,7 @@ from collections.abc import Callable
 # services the HUD consumes (besides raw `can`)
 SERVICES = [
   "carState", "carParams", "selfdriveState", "selfdriveStateSP", "carControl", "radarState", "modelV2",
-  "longitudinalPlan", "longitudinalPlanSP", "driverMonitoringState", "deviceState", "liveMapDataSP",
+  "longitudinalPlan", "longitudinalPlanSP", "driverMonitoringState", "deviceState", "liveMapDataSP", "carStateSP",
   "gpsLocationExternal", "gpsLocation",   # u-blox or the modem's GPS: whichever the device has publishes
 ]
 
@@ -253,6 +253,19 @@ def live_map_data_sp(lm) -> dict:
   }
 
 
+def car_state_sp(cs) -> dict:
+  # the route turn sunnypilot is using: the car's own navigation, else the nav app's from OceanScape (card)
+  rt = _g(cs, "routeTurn")
+  direction = _enum(_g(rt, "direction")) if rt is not None else None
+  return {
+    "routeTurn": {
+      "direction": direction,
+      "distance": _f(_g(rt, "distance"), 1),
+      "fromNavApp": bool(_g(rt, "fromNavApp", False)),
+    } if direction and direction != "none" else None,
+  }
+
+
 def gps_location(gps) -> dict:
   acc = _g(gps, "horizontalAccuracy")
   return {
@@ -278,6 +291,7 @@ EXTRACTORS: dict[str, Callable] = {
   "driverMonitoringState": driver_monitoring_state,
   "deviceState": device_state,
   "liveMapDataSP": live_map_data_sp,
+  "carStateSP": car_state_sp,
   "gpsLocationExternal": gps_location,
   "gpsLocation": gps_location,
 }
