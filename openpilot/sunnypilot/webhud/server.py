@@ -396,13 +396,6 @@ class HudServer(ThreadingHTTPServer):
 NAV_TURN = NavTurnPublisher()
 
 
-def _private(host: str) -> bool:
-  try:
-    return ipaddress.ip_address(host).is_private
-  except ValueError:
-    return False
-
-
 MAP_TILES = MapTiles()
 MAP_FEATURES = MapFeatures()
 MAP_PREFETCH = MapPrefetch(MAP_TILES, MAP_FEATURES)
@@ -679,8 +672,6 @@ class HudHandler(BaseHTTPRequestHandler):
       replay_command(self.server.engine, data)
     elif kind == "ping":
       client.push(json.dumps({"type": "pong", "t": data.get("t")}))
-    elif kind == "routeTurn" and _private(client.peer):   # the nav app's next turn, for card (navturn.py)
-      NAV_TURN.publish(data)
 
 
 def status_payload(server: HudServer) -> dict:
@@ -777,6 +768,14 @@ def api_upload(h: HudHandler, q) -> None:
   cloudlog.info(f"webhud: uploaded {name} -> {dest}")
   h.server.engine.command("load_route", route, [{"n": 0, "path": dest}], 0.0)
   h._json({"ok": True, "route": route})
+
+
+def api_route_turn(h: HudHandler, q) -> None:
+  # the head unit nav app's next turn, from OceanScape's Android app, for card (navturn.py); a write, so local only
+  body = h._json_body()
+  if not isinstance(body, dict):
+    return h._error(400, "expected an object")
+  h._json({"ok": NAV_TURN.publish(body)})
 
 
 def api_params_get(h: HudHandler, q) -> None:
@@ -992,6 +991,7 @@ ROUTES = {
   ("PUT", "/api/upload"): api_upload,
   ("GET", "/api/params"): api_params_get,
   ("PUT", "/api/params"): api_params_put,
+  ("POST", "/api/route_turn"): api_route_turn,
   ("GET", "/api/overrides"): api_overrides_get,
   ("PUT", "/api/overrides"): api_overrides_put,
   ("DELETE", "/api/overrides"): api_overrides_delete,

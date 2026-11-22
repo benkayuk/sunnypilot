@@ -1,10 +1,11 @@
 """
-The next turn of the head unit's nav app, from the OceanScape page over the WebSocket, published as navRouteTurnSP for
-card (sunnypilot/selfdrive/car/nav_route_turn.py), which uses it when the car's own navigation has no route turn.
+The next turn of the head unit's nav app, from OceanScape's Android app (POST /api/route_turn), published as
+navRouteTurnSP for card (sunnypilot/selfdrive/car/nav_route_turn.py), which uses it when the car's own navigation has no
+route turn.
 
-The page sends {"type": "routeTurn", "direction": "left" | "right" | null, "distance": m, "tolerance": m, "age": s,
-"step": "...", "app": "..."} each time the nav app's notification changes and once a second besides. `age` is how long
-ago the app wrote that distance, on the head unit's clock, so this device's time of it is now - age.
+The app sends {"type": "routeTurn", "direction": "left" | "right" | null, "distance": m, "tolerance": m, "age": s,
+"step": "...", "app": "..."} each time the nav app's notification changes and once a second besides, on screen or not.
+`age` is how long ago the app wrote that distance, on the head unit's clock, so this device's time of it is now - age.
 """
 import threading
 import time
@@ -67,5 +68,9 @@ class NavTurnPublisher:
     msg = messaging.new_message("navRouteTurnSP")
     for key, value in fields.items():
       setattr(msg.navRouteTurnSP, key, value)
-    self.pm.send("navRouteTurnSP", msg)
+    try:
+      self.pm.send("navRouteTurnSP", msg)
+    except Exception:
+      cloudlog.exception("webhud: navRouteTurnSP send failed")
+      return False
     return True
