@@ -249,6 +249,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"FiskerMadsArmed", {CLEAR_ON_MANAGER_START, BOOL, "0"}},
     {"FiskerOverrideTorque", {PERSISTENT | BACKUP, FLOAT, "3.0"}},  // driver-takeover torque (Nm), live; 6.5 = the EPS's own
     {"FiskerSpeedLimitUnit", {PERSISTENT | BACKUP, INT, "0"}},  // sign unit to the ADAS: 0 dash, 1 mph, 2 km/h, 3 the ICC's
+    {"FiskerStopAssist", {PERSISTENT | BACKUP, BOOL, "0"}},  // lower the car's own ACC request for a stop the model predicts
+    {"FiskerStopAssistTest", {CLEAR_ON_MANAGER_START, BOOL, "0"}},  // stop assist: fixed -1 m/s2 pulse after each ACC engage
     {"FiskerTrafficSide", {PERSISTENT | BACKUP, INT, "0"}},  // traffic side to the ADAS: 0 the ICC's, 1 left, 2 right
     // Fisker remote-control (phone-over-wifi) params. All CLEAR_ON_MANAGER_START
     // so a fresh boot always comes up with the app disabled and no stale angle.

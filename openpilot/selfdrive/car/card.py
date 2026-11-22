@@ -82,7 +82,8 @@ class Car:
     self.CC_prev = car.CarControl.new_message()
     self.CS_prev = car.CarState.new_message()
     self.CS_SP_prev = custom.CarStateSP.new_message()
-    self.initialized_prev = False
+    self.controls_ready = False
+    self.takeover_held = False
 
     self.last_actuators_output = structs.CarControl.Actuators()
 
@@ -257,17 +258,24 @@ class Car:
     cs_sp_send = messaging.new_message('carStateSP')
     cs_sp_send.valid = CS.canValid
     cs_sp_send.carStateSP = CS_SP
+    cs_sp_send.carStateSP.takeoverHeld = self.takeover_held
     self.pm.send('carStateSP', cs_sp_send)
 
   def controls_update(self, CS: car.CarState, CC: car.CarControl, CC_SP: custom.CarControlSP):
     """control update loop, driven by carControl"""
 
-    if not self.initialized_prev:
+    if not self.controls_ready:
+      # sunnypilot: the car port can keep the panda in pass-through (the car as stock) a while longer,
+      # e.g. Fisker until its ADAS has finished starting
+      self.takeover_held = not self.CI.ready_to_take_over(CS)
+      if self.takeover_held:
+        return
       # Initialize CarInterface, once controls are ready
       # TODO: this can make us miss at least a few cycles when doing an ECU knockout
       self.CI.init(self.CP, self.CP_SP, *self.can_callbacks)
       # signal pandad to switch to car safety mode
       self.params.put_bool("ControlsReady", True)
+      self.controls_ready = True
 
     if self.sm.all_alive(['carControl']):
       # send car controls over can
@@ -287,7 +295,6 @@ class Car:
     if not self.CP.passive and initialized:
       self.controls_update(CS, self.sm['carControl'], self.sm['carControlSP'])
 
-    self.initialized_prev = initialized
     self.CS_prev = CS
     self.CS_SP_prev = CS_SP
 

@@ -31,6 +31,7 @@ from openpilot.sunnypilot import get_sanitize_int_param
 from openpilot.sunnypilot.selfdrive.car.car_specific import CarSpecificEventsSP
 from openpilot.sunnypilot.selfdrive.car.cruise_helpers import CruiseHelper
 from openpilot.sunnypilot.selfdrive.car.intelligent_cruise_button_management.controller import IntelligentCruiseButtonManagement
+from openpilot.sunnypilot.selfdrive.controls.lib.route_turn import route_turn_prompt
 from openpilot.sunnypilot.selfdrive.selfdrived.button_state_tracker import ButtonStateTracker
 from openpilot.sunnypilot.selfdrive.selfdrived.events import EventsSP
 
@@ -98,7 +99,7 @@ class SelfdriveD(CruiseHelper):
     # TODO: de-couple selfdrived with card/conflate on carState without introducing controls mismatches
     self.car_state_sock = messaging.sub_sock('carState', timeout=20)
 
-    ignore = self.sensor_packets + self.gps_packets + ['alertDebug', 'lateralManeuverPlan'] + ['modelDataV2SP', 'longitudinalPlanSP']
+    ignore = self.sensor_packets + self.gps_packets + ['alertDebug', 'lateralManeuverPlan'] + ['modelDataV2SP', 'longitudinalPlanSP', 'carStateSP']
     if SIMULATION:
       ignore += ['cabinCameraState', 'managerState']
     if REPLAY:
@@ -108,7 +109,7 @@ class SelfdriveD(CruiseHelper):
                                    'carOutput', 'driverMonitoringState', 'longitudinalPlan', 'deviceMotion', 'lateralDelay',
                                    'managerState', 'vehicleParameters', 'radarState', 'lateralTorqueParameters',
                                    'controlsState', 'carControl', 'driverAssistance', 'alertDebug', 'userBookmark',
-                                   'lateralManeuverPlan', 'modelDataV2SP', 'longitudinalPlanSP'] + \
+                                   'lateralManeuverPlan', 'modelDataV2SP', 'longitudinalPlanSP', 'carStateSP'] + \
                                    self.camera_packets + self.sensor_packets + self.gps_packets,
                                   ignore_alive=ignore, ignore_avg_freq=ignore,
                                   ignore_valid=ignore, frequency=int(1/DT_CTRL))
@@ -135,6 +136,7 @@ class SelfdriveD(CruiseHelper):
     self.active = False
     self.mismatch_counter = 0
     self.cruise_mismatch_counter = 0
+    self.last_takeover_held_frame = -1_000_000
     self.last_steering_pressed_frame = 0
     self.distance_traveled = 0
     self.last_functional_fan_frame = 0
@@ -377,6 +379,32 @@ class SelfdriveD(CruiseHelper):
     elif lane_turn_direction == TurnDirection.turnRight:
       self.events_sp.add(custom.OnroadEventSP.EventName.laneTurnRight)
 
+    # Ask the driver to signal a coming turn on the car's navigation route while sunnypilot steers (route_turn.py)
+    if self.sm['carControl'].latActive:
+      route_turn_signal = route_turn_prompt(self.sm['carStateSP'].routeTurn, CS.leftBlinker, CS.rightBlinker)
+      if route_turn_signal == TurnDirection.turnLeft:
+        self.events_sp.add(custom.OnroadEventSP.EventName.routeTurnLeftAhead)
+      elif route_turn_signal == TurnDirection.turnRight:
+        self.events_sp.add(custom.OnroadEventSP.EventName.routeTurnRightAhead)
+
+    # The car port has stopped steering and left the wheel to the driver while lateral is engaged
+    if self.sm['carStateSP'].steeringYielded:
+      self.events_sp.add(custom.OnroadEventSP.EventName.steeringYielded)
+
+    # The car port is slowing the car's own ACC for a stop the model predicts, and wants the driver to finish it
+    stop_assist = self.sm['carStateSP'].stopAssist
+    if stop_assist == custom.CarStateSP.StopAssistState.slowing:
+      self.events_sp.add(custom.OnroadEventSP.EventName.stopAssistSlowing)
+    elif stop_assist == custom.CarStateSP.StopAssistState.brakeToStop:
+      self.events_sp.add(custom.OnroadEventSP.EventName.stopAssistBrake)
+
+    # card still keeps the panda in pass-through, the car as stock, until the car port is ready (Fisker: its ADAS has started)
+    if self.sm['carStateSP'].takeoverHeld:
+      self.last_takeover_held_frame = self.sm.frame
+      self.events_sp.add(custom.OnroadEventSP.EventName.takeoverHeld)
+    # pandad switches the panda's safety mode up to ~0.2 s after the hold ends
+    takeover_settling = self.sm.frame - self.last_takeover_held_frame < int(2. / DT_CTRL)
+
     for i, pandaState in enumerate(self.sm['pandaStates']):
       # All pandas must match the list of safetyConfigs, and if outside this list, must be silent or noOutput
       if i < len(self.CP.safetyConfigs):
@@ -387,7 +415,8 @@ class SelfdriveD(CruiseHelper):
         safety_mismatch = pandaState.safetyModel not in IGNORED_SAFETY_MODES
 
       # safety mismatch allows some time for pandad to set the safety mode and publish it back from panda
-      if (safety_mismatch and self.sm.frame*DT_CTRL > 10.) or pandaState.safetyRxChecksInvalid or self.mismatch_counter >= 200:
+      if (safety_mismatch and self.sm.frame*DT_CTRL > 10. and not takeover_settling) or pandaState.safetyRxChecksInvalid or \
+         self.mismatch_counter >= 200:
         self.events.add(EventName.controlsMismatch)
 
       if log.PandaState.FaultType.relayMalfunction in pandaState.faults:
