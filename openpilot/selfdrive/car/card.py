@@ -27,6 +27,8 @@ from openpilot.sunnypilot.mads.helpers import set_alternative_experience, set_ca
 from openpilot.sunnypilot.selfdrive.car import interfaces as sunnypilot_interfaces
 from openpilot.sunnypilot.selfdrive.car.can_overrides import CanOverrides
 from openpilot.sunnypilot.selfdrive.car.fisker_takeover import takeover_torque
+from openpilot.sunnypilot.selfdrive.car.nav_route_turn import NavAppRouteTurn
+from openpilot.sunnypilot.selfdrive.controls.lib.route_turn import DEFAULT_LIMITS, route_turn_limits
 
 REPLAY = "REPLAY" in os.environ
 
@@ -74,7 +76,7 @@ class Car:
 
   def __init__(self, CI=None, RI=None) -> None:
     self.can_sock = messaging.sub_sock('can', timeout=20)
-    self.sm = messaging.SubMaster(['pandaStates', 'carControl', 'onroadEvents'] + ['carControlSP', 'longitudinalPlanSP'])
+    self.sm = messaging.SubMaster(['pandaStates', 'carControl', 'onroadEvents'] + ['carControlSP', 'longitudinalPlanSP', 'navRouteTurnSP'])
     self.pm = messaging.PubMaster(['sendcan', 'carState', 'carParams', 'carOutput', 'radarTracks'] + ['carParamsSP', 'carStateSP'])
 
     self.can_rcv_cum_timeout_counter = 0
@@ -82,6 +84,9 @@ class Car:
     self.CC_prev = car.CarControl.new_message()
     self.CS_prev = car.CarState.new_message()
     self.CS_SP_prev = custom.CarStateSP.new_message()
+    # a nav app's next turn on the head unit (OceanScape), when the car's own navigation has none
+    self.nav_route_turn = NavAppRouteTurn()
+    self.route_turn_limits = DEFAULT_LIMITS
     self.controls_ready = False
     self.takeover_held = False
 
@@ -196,6 +201,14 @@ class Car:
     RD: structs.RadarDataT | None = self.RI.update(can_list)
 
     self.sm.update(0)
+
+    if self.sm.frame % 500 == 0:
+      self.route_turn_limits = route_turn_limits(self.params)
+    nav_msg = self.sm['navRouteTurnSP'] if self.sm.updated['navRouteTurnSP'] else None
+    nav_turn = self.nav_route_turn.update(CS.vEgo, DT_CTRL, nav_msg, self.route_turn_limits)
+    if nav_turn is not None and CS_SP.routeTurn.direction == 'none':
+      CS_SP.routeTurn.direction, CS_SP.routeTurn.distance = nav_turn
+      CS_SP.routeTurn.fromNavApp = True
 
     can_rcv_valid = len(can_strs) > 0
 

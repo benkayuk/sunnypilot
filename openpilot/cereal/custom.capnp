@@ -476,6 +476,7 @@ struct CarStateSP @0xb86e6369214c01c8 {
   struct RouteTurn {
     direction @0 :ModelDataV2SP.TurnDirection;
     distance @1 :Float32;  # m along the road to the turn point, negative once past it
+    fromNavApp @2 :Bool;   # from a phone-style nav app on the head unit (navRouteTurnSP), not the car's own navigation
   }
 }
 
@@ -500,7 +501,15 @@ struct ModelDataV2SP @0xa1680744031fdb2d {
   }
 }
 
-struct CustomReserved10 @0xcb9fd56c7057593a {
+# The next turn of a nav app on the head unit (OceanScape reads Google Maps' turn-by-turn notification and sends it to
+# webhud). card uses it for carStateSP.routeTurn when the car's own navigation has none.
+struct NavRouteTurnSP @0xcb9fd56c7057593a {
+  direction @0 :ModelDataV2SP.TurnDirection;
+  distance @1 :Float32;          # m to the turn point, as the nav app last wrote it
+  distanceTolerance @2 :Float32; # m either side the written distance was rounded to ("50 m": 5)
+  observedMonoTime @3 :UInt64;   # this device's monotonic clock (ns) when the nav app wrote that distance
+  turnId @4 :UInt32;             # changes with each new step of the route
+  app @5 :Text;                  # the nav app's package
 }
 
 struct CustomReserved11 @0xc2243c65e0340384 {

@@ -277,6 +277,10 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"LagdValueCache", {PERSISTENT, FLOAT, "0.2"}},
     {"LaneTurnDesire", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"LaneTurnValue", {PERSISTENT | BACKUP, FLOAT, "19.0"}},
+    // route turns (route_turn.py), in m from the turn point: ask to signal, start turning, keep turning past it
+    {"RouteTurnPromptDistance", {PERSISTENT | BACKUP, FLOAT, "150.0"}},
+    {"RouteTurnStartDistance", {PERSISTENT | BACKUP, FLOAT, "30.0"}},
+    {"RouteTurnEndDistance", {PERSISTENT | BACKUP, FLOAT, "15.0"}},
     {"PlanplusControl", {PERSISTENT | BACKUP, FLOAT, "1.0"}},
 
     // mapd
