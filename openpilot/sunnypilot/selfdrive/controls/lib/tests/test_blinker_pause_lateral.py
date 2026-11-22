@@ -6,6 +6,7 @@ See the LICENSE.md file in the root directory for more details.
 """
 from opendbc.car.structs import car
 
+from openpilot.cereal import custom
 from openpilot.common.constants import CV
 from openpilot.sunnypilot.selfdrive.controls.lib.blinker_pause_lateral import BlinkerPauseLateral
 from openpilot.common.test import OpenpilotTestCase
@@ -23,6 +24,8 @@ class TestBlinkerPauseLateral(OpenpilotTestCase):
     self.blinker_pause_lateral.min_speed = 20  # MPH
     self.blinker_pause_lateral.reengage_delay = 0
     self.blinker_pause_lateral.blinker_off_timer = 0.0
+    self.blinker_pause_lateral.lane_turn_speed = 19 * CV.MPH_TO_MS
+    self.blinker_pause_lateral.route_turn_blinker = None
 
     self.CS = car.CarState.new_message()
     self.CS.vEgo = 0
@@ -143,3 +146,24 @@ class TestBlinkerPauseLateral(OpenpilotTestCase):
       (True, True): False
     }
     self._test_should_blinker_pause_lateral(expected_results)
+
+  def test_route_turn_keeps_steering_until_blinker_off(self):
+    # signalling the route's turn near it: the model takes the turn, so no pause, through the turn and
+    # past the end of the request while that blinker stays on
+    self.blinker_pause_lateral.reengage_delay = 1
+    self.CS.vEgo = 4.5
+    self.CS.rightBlinker = True
+    route_turn = custom.CarStateSP.RouteTurn.new_message(direction="turnRight", distance=20.0)
+    assert not self.blinker_pause_lateral.update(self.CS, route_turn=route_turn)
+    route_turn.distance = -40.0
+    assert not self.blinker_pause_lateral.update(self.CS, route_turn=route_turn)
+    self.CS.rightBlinker = False
+    assert not self.blinker_pause_lateral.update(self.CS, route_turn=route_turn)  # no re-engage delay to sit out
+    self.CS.rightBlinker = True
+    assert self.blinker_pause_lateral.update(self.CS, route_turn=route_turn)  # a new blinker, away from the turn
+
+  def test_route_turn_other_way_still_pauses(self):
+    self.CS.vEgo = 4.5
+    self.CS.leftBlinker = True
+    route_turn = custom.CarStateSP.RouteTurn.new_message(direction="turnRight", distance=20.0)
+    assert self.blinker_pause_lateral.update(self.CS, route_turn=route_turn)

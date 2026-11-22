@@ -42,6 +42,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
 from openpilot.common.swaglog import cloudlog
+from openpilot.sunnypilot.selfdrive.car.fisker_takeover import valid as takeover_torque_valid
 from openpilot.sunnypilot.webhud.demo import DemoSource
 from openpilot.sunnypilot.webhud.mdns import MdnsPublisher, ipv4_interfaces
 from openpilot.sunnypilot.webhud.paths import STATIC_DIR, STATIC_FILES, STATIC_ROOTS
@@ -81,6 +82,15 @@ PARAM_ALLOWLIST: dict[str, tuple[type, Callable[[int], bool] | None]] = {
   "IsMetric": (bool, None),
   "FiskerACCAutoSpeed": (bool, None),   # these two are the 0x52A spoof's baseline; ICC_0x52A overrides win
   "FiskerACCTerrain": (bool, None),
+  # what panda tells the ADAS in the head unit's map metadata (0x362); applied at the next car start. With
+  # FiskerAdasAuto on, the country of the last GPS fix decides, and FiskerAdasAutoCountry (read-only) says which
+  "FiskerAdasAuto": (bool, None),
+  "FiskerAdasAutoCountry": (str, lambda v: False),
+  "FiskerSpeedLimitUnit": (int, lambda v: v in (0, 1, 2, 3)),
+  "FiskerTrafficSide": (int, lambda v: v in (0, 1, 2)),
+  "FiskerCountryCode": (int, lambda v: 0 <= v <= 999),
+  # driver-takeover torque (Nm), applied live by card, so editable while driving; 6.5 = the EPS's own
+  "FiskerOverrideTorque": (float, lambda v: takeover_torque_valid(v)),
 }
 
 

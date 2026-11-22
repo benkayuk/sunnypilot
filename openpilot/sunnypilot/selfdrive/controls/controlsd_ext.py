@@ -17,6 +17,8 @@ from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
 from openpilot.sunnypilot.modeld_v2.modeld_base import ModelStateBase
 from openpilot.sunnypilot.selfdrive.controls.lib.blinker_pause_lateral import BlinkerPauseLateral
 from openpilot.sunnypilot.selfdrive.controls.lib.latcontrol_torque_v0 import LatControlTorque as LatControlTorqueV0
+from openpilot.sunnypilot.selfdrive.controls.lib.stop_prediction import TEST_PARAM as STOP_ASSIST_TEST_PARAM, StopPrediction
+from opendbc.sunnypilot.car.fisker.values_ext import FiskerFlagsSP
 
 
 class ControlsExt(ModelStateBase):
@@ -31,7 +33,10 @@ class ControlsExt(ModelStateBase):
     self.CP_SP = messaging.log_from_bytes(params.get("CarParamsSP", block=True), custom.CarParamsSP)
     cloudlog.info("controlsd_ext got CarParamsSP")
 
-    self.sm_services_ext = ['radarState', 'selfdriveStateSP']
+    # Fisker stop assist: the model's stop prediction for the car port, which lowers the car's own ACC request
+    self.stop_prediction = StopPrediction() if self.CP.brand == 'fisker' and self.CP_SP.flags & FiskerFlagsSP.STOP_ASSIST else None
+
+    self.sm_services_ext = ['radarState', 'selfdriveStateSP', 'carStateSP']
     self.pm_services_ext = ['carControlSP']
 
   def initialize_lateral_control(self, lac, CI, dt):
@@ -50,6 +55,8 @@ class ControlsExt(ModelStateBase):
   def get_params_sp(self, sm: messaging.SubMaster) -> None:
     if time.monotonic() - self._param_update_time > PARAMS_UPDATE_PERIOD:
       self.blinker_pause_lateral.get_params()
+      if self.stop_prediction is not None:
+        self.stop_prediction.test_enabled = self.params.get_bool(STOP_ASSIST_TEST_PARAM)
 
       if self.CP.lateralTuning.which() == 'torque':
         self.lat_delay = get_lat_delay(self.params, sm["lateralDelay"].lateralDelay)
@@ -57,7 +64,7 @@ class ControlsExt(ModelStateBase):
       self._param_update_time = time.monotonic()
 
   def get_lat_active(self, sm: messaging.SubMaster) -> bool:
-    if self.blinker_pause_lateral.update(sm['carState']):
+    if self.blinker_pause_lateral.update(sm['carState'], route_turn=sm['carStateSP'].routeTurn):
       return False
 
     ss_sp = sm['selfdriveStateSP']
@@ -103,6 +110,12 @@ class ControlsExt(ModelStateBase):
     CC_SP.intelligentCruiseButtonManagement.state = icbm_src.state
     CC_SP.intelligentCruiseButtonManagement.sendButton = icbm_src.sendButton
     CC_SP.intelligentCruiseButtonManagement.vTarget = icbm_src.vTarget
+
+    if self.stop_prediction is not None:
+      CS = sm['carState']
+      model_ok = sm.alive['modelV2'] and sm.valid['modelV2']
+      CC_SP.stopAssist.active, CC_SP.stopAssist.accel = self.stop_prediction.update(sm['modelV2'], CS.vEgo, CS.cruiseState.enabled,
+                                                                                    model_ok)
 
     return CC_SP
 

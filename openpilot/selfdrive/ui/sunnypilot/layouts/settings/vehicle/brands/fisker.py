@@ -59,7 +59,25 @@ class FiskerSettings(BrandSettings):
       param="FiskerBasicCruise",
     )
 
-    self.items = [self.acc_auto_speed_toggle, self.acc_terrain_toggle, self.lateral_type_toggle, self.basic_cruise_toggle]
+    # The car's ACC keeps driving; sunnypilot only lowers its request for a stop its driving model predicts.
+    self.stop_assist_toggle = toggle_item_sp(
+      tr("Stop Assist (experimental)"),
+      tr("With the car's ACC engaged, slow down for red lights and stop signs that sunnypilot sees, braking up to " +
+         "1.5 m/s². Below 12 km/h it asks you to brake to finish the stop, and keeps slowing until you do. " +
+         "Takes effect next drive."),
+      param="FiskerStopAssist",
+    )
+
+    # A fixed slow-down to check how the car takes stop assist, in an empty lot. Off again at every start.
+    self.stop_assist_test_toggle = toggle_item_sp(
+      tr("Stop Assist Test Pulse (empty lot only)"),
+      tr("Needs Stop Assist. Each time you engage ACC between 20 and 40 km/h, slows at 1 m/s² for 3 s starting 2 s " +
+         "later, whatever is ahead. Turns itself off when the device restarts."),
+      param="FiskerStopAssistTest",
+    )
+
+    self.items = [self.acc_auto_speed_toggle, self.acc_terrain_toggle, self.lateral_type_toggle, self.basic_cruise_toggle,
+                  self.stop_assist_toggle, self.stop_assist_test_toggle]
 
   def update_settings(self):
     pass

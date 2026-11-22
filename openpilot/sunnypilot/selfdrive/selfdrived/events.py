@@ -260,4 +260,48 @@ EVENTS_SP: dict[int, dict[str, Alert | AlertCallbackType]] = {
       AlertStatus.normal, AlertSize.small,
       Priority.LOW, VisualAlert.none, AudibleAlert.prompt, 2.),
   },
+
+  EventNameSP.routeTurnLeftAhead: {
+    ET.WARNING: Alert(
+      "Left Turn Ahead",
+      "Signal to let sunnypilot turn",
+      AlertStatus.userPrompt, AlertSize.mid,
+      Priority.LOW, VisualAlert.none, AudibleAlert.prompt, 1.),
+  },
+
+  EventNameSP.routeTurnRightAhead: {
+    ET.WARNING: Alert(
+      "Right Turn Ahead",
+      "Signal to let sunnypilot turn",
+      AlertStatus.userPrompt, AlertSize.mid,
+      Priority.LOW, VisualAlert.none, AudibleAlert.prompt, 1.),
+  },
+
+  EventNameSP.steeringYielded: {
+    ET.WARNING: Alert(
+      "You Are Steering",
+      "sunnypilot resumes when you let go",
+      AlertStatus.userPrompt, AlertSize.mid,
+      Priority.MID, VisualAlert.none, AudibleAlert.none, .5),
+  },
+
+  EventNameSP.stopAssistSlowing: {
+    ET.WARNING: Alert(
+      "Slowing for Stop",
+      "Be ready to brake",
+      AlertStatus.normal, AlertSize.mid,
+      Priority.LOW, VisualAlert.none, AudibleAlert.none, .2),
+  },
+
+  EventNameSP.stopAssistBrake: {
+    ET.WARNING: Alert(
+      "Brake to Stop",
+      "Stop assist won't hold the car",
+      AlertStatus.userPrompt, AlertSize.mid,
+      Priority.MID, VisualAlert.none, AudibleAlert.prompt, .2),
+  },
+
+  EventNameSP.takeoverHeld: {
+    ET.NO_ENTRY: NoEntryAlert("Waiting for Car Systems to Start"),
+  },
 }
