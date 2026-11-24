@@ -11,7 +11,7 @@ import math
 PARAM = "FiskerOverrideTorque"
 MIN_NM = 1.5
 EPS_NM = 6.5     # the EPS's own intervention torque: at or above this, leave the takeover to it
-DEFAULT_NM = 3.0
+DEFAULT_NM = 2.0
 
 
 def valid(nm: float) -> bool:

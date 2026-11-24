@@ -247,7 +247,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     // state. mads.block_unified_engagement_mode reads it to decide whether UEM should
     // engage lateral alongside the cruise→Active transition on fisker.
     {"FiskerMadsArmed", {CLEAR_ON_MANAGER_START, BOOL, "0"}},
-    {"FiskerOverrideTorque", {PERSISTENT | BACKUP, FLOAT, "3.0"}},  // driver-takeover torque (Nm), live; 6.5 = the EPS's own
+    {"FiskerOverrideTorque", {PERSISTENT | BACKUP, FLOAT, "2.0"}},  // driver-takeover torque (Nm), live; 6.5 = the EPS's own
     {"FiskerSpeedLimitUnit", {PERSISTENT | BACKUP, INT, "0"}},  // sign unit to the ADAS: 0 dash, 1 mph, 2 km/h, 3 the ICC's
     {"FiskerStopAssist", {PERSISTENT | BACKUP, BOOL, "0"}},  // lower the car's own ACC request for a stop the model predicts
     {"FiskerStopAssistTest", {CLEAR_ON_MANAGER_START, BOOL, "0"}},  // stop assist: fixed -1 m/s2 pulse after each ACC engage
